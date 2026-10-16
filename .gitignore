@@ -1,0 +1,21 @@
+.DS_Store
+
+# Xcode / SwiftPM build output
+build/
+DerivedData/
+*.xcresult
+xcuserdata/
+*.xcuserstate
+.swiftpm/
+Packages/WCleanerCore/.build/
+Packages/WCleanerCore/.swiftpm/
+
+# Local, developer-specific configuration (GitHub client ID, signing identity)
+Config/Local.xcconfig
+
+# Release artifacts
+dist/
+
+# Local tooling caches
+.code-review-graph/
+graphify-out/

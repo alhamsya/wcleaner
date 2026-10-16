@@ -1,0 +1,17 @@
+// Shared build settings for the WCleaner app target.
+//
+// Developer-specific values belong in Config/Local.xcconfig (gitignored). Start from
+// Config/Local.xcconfig.example. Nothing in this file or Local.xcconfig may be a secret:
+// a GitHub client ID is public, and client secrets / private keys are never used by WCleaner.
+
+WCLEANER_BUNDLE_IDENTIFIER = io.github.alhamsya.WCleaner
+
+// Public client ID of your GitHub App (recommended) or OAuth App with Device Flow enabled.
+// Empty means GitHub sign-in is shown as "Not configured".
+WCLEANER_GITHUB_CLIENT_ID =
+
+// Release signing (Developer ID). Debug builds are always signed to run locally ("-").
+WCLEANER_CODE_SIGN_IDENTITY = -
+WCLEANER_DEVELOPMENT_TEAM =
+
+#include? "Local.xcconfig"

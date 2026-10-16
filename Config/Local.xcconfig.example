@@ -1,0 +1,11 @@
+// Copy to Config/Local.xcconfig (gitignored) and fill in. Never put secrets here.
+
+// Public client ID of your GitHub App (Settings › Developer settings › GitHub Apps › <app> › Client ID).
+// WCLEANER_GITHUB_CLIENT_ID = Iv23liXXXXXXXXXXXXXX
+
+// Optional: use your own bundle identifier for local builds.
+// WCLEANER_BUNDLE_IDENTIFIER = com.example.WCleaner
+
+// Release-only: Developer ID signing. Leave unset for local development.
+// WCLEANER_CODE_SIGN_IDENTITY = Developer ID Application
+// WCLEANER_DEVELOPMENT_TEAM = ABCDE12345
