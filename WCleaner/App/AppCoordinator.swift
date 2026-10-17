@@ -143,7 +143,8 @@ final class AppCoordinator: AppActions {
             deviceFlow: GitHubDeviceFlow(transport: transport, configuration: configuration),
             api: api,
             accounts: accounts,
-            credentials: KeychainCredentialStore(serviceBase: AppEnvironment.bundleIdentifier + ".github")
+            credentials: KeychainCredentialStore(serviceBase: AppEnvironment.bundleIdentifier + ".github"),
+            gitHubCLI: GitHubCLI(host: configuration.host)
         )
         let mappings = RepositoryAccountMappingStore(store: JSONFileStore(directory: data, fileName: "account-mappings.json"))
         let resolver = RepositoryAccountResolver(configuration: configuration, api: api, tokens: auth, accounts: accounts, mappings: mappings)
@@ -262,7 +263,8 @@ final class AppCoordinator: AppActions {
     }
 
     private func handle(_ event: MonitorEvent) {
-        if case .cleanupCompleted = event {
+        if case .cleanupCompleted(let outcome) = event {
+            if outcome.didRemove { statusItemController?.celebrateCleanup() }
             Task { await reloadHistory() }
         }
         let enabled = settingsStore.settings.notificationsEnabled
@@ -391,6 +393,44 @@ final class AppCoordinator: AppActions {
         }
     }
 
+    func editDisposableIgnoredPaths(for repositoryID: UUID) {
+        guard let repository = model.repositories.first(where: { $0.id == repositoryID }),
+              let paths = Dialogs.editDisposableIgnoredPaths(repository.disposableIgnoredPaths, repositoryName: repository.displayName),
+              paths != repository.disposableIgnoredPaths else { return }
+        saveDisposableIgnoredPaths(paths, for: repositoryID)
+    }
+
+    /// Adds exactly the ignored paths WCleaner reported for this worktree, after the user confirms them.
+    func allowDisposableIgnoredFiles(_ worktree: WorktreeSnapshot) {
+        guard let repository = model.repositories.first(where: { $0.id == worktree.repositoryID }) else { return }
+        let reported = worktree.decision.reasons.compactMap { reason -> [String]? in
+            if case .ignoredFiles(let count, let paths) = reason, paths.count == count { paths } else { nil }
+        }.first ?? []
+        let additions = DisposablePaths.normalizedList(reported)
+        guard !additions.isEmpty, additions.count == reported.count else {
+            Dialogs.showError(
+                "Ignored Files Not Listed",
+                "WCleaner could not list every ignored file in this worktree. Add the paths you want to allow in Settings › Repositories."
+            )
+            return
+        }
+        guard Dialogs.confirmDisposableIgnoredFiles(additions, repositoryName: repository.displayName) else { return }
+        saveDisposableIgnoredPaths(DisposablePaths.normalizedList(repository.disposableIgnoredPaths + additions), for: repository.id)
+    }
+
+    private func saveDisposableIgnoredPaths(_ paths: [String], for repositoryID: UUID) {
+        guard let services = requireServices() else { return }
+        Task {
+            do {
+                try await services.registry.update(id: repositoryID) { $0.disposableIgnoredPaths = paths }
+            } catch {
+                Dialogs.showError("Could Not Save the List", error.userMessage)
+            }
+            await reloadRepositories()
+            await services.scheduler.checkNow()
+        }
+    }
+
     func refreshDiskUsage() {
         guard let services = requireServices() else { return }
         Task { await services.engine.refreshDiskUsage(force: true) }
@@ -403,15 +443,50 @@ final class AppCoordinator: AppActions {
     }
 
     func reconnectAccount(_ id: AccountID) {
-        startSignIn(expecting: id)
+        if let account = model.account(id), account.source == .gitHubCLI {
+            connectGitHubCLI(expecting: account)
+        } else {
+            startSignIn(expecting: id)
+        }
+    }
+
+    func addGitHubCLIAccount() {
+        connectGitHubCLI(expecting: nil)
+    }
+
+    /// Borrows a token from GitHub CLI instead of signing in with the device flow. Works without the
+    /// GitHub App being installed in an organization, because GitHub CLI is already authorized there.
+    private func connectGitHubCLI(expecting: GitHubAccount?) {
+        guard let services = requireServices() else { return }
+        Task {
+            let available: [GitHubCLIAccount]
+            do {
+                available = try await services.auth.gitHubCLIAccounts()
+            } catch {
+                Dialogs.showError("GitHub CLI Is Not Available", error.userMessage)
+                return
+            }
+            guard let login = Dialogs.chooseGitHubCLIAccount(available, preselect: expecting?.login) else { return }
+            do {
+                let result = try await services.auth.connectGitHubCLI(login: login, expecting: expecting?.id)
+                await reloadAccounts()
+                for mapping in await services.mappings.all() where mapping.accountID == result.account.id {
+                    await services.engine.accountMappingChanged(repositoryID: mapping.repositoryID, settings: settingsStore.settings)
+                }
+                await services.scheduler.checkNow()
+            } catch {
+                Dialogs.showError("Could Not Use the GitHub CLI Login", error.userMessage)
+            }
+        }
     }
 
     private func startSignIn(expecting: AccountID?) {
         guard configuration.isConfigured else {
             Dialogs.showError(
                 "GitHub Sign-In Is Not Configured",
-                "This build of WCleaner has no GitHub App client ID, so no account can be connected. "
-                    + "Register a GitHub App with device flow enabled and set WCLEANER_GITHUB_CLIENT_ID as described in GITHUB_APP_SETUP.md, then rebuild."
+                "This build of WCleaner has no GitHub App client ID, so it cannot sign in with GitHub's device flow. "
+                    + "Register a GitHub App with device flow enabled and set WCLEANER_GITHUB_CLIENT_ID as described in GITHUB_APP_SETUP.md, then rebuild. "
+                    + "Meanwhile you can use “Use GitHub CLI Login…”."
             )
             return
         }
@@ -524,13 +599,18 @@ final class AppCoordinator: AppActions {
                 await reloadHistory()
             }
         case .openPullRequest:
-            if let string = worktree.decision.evidence?.url, let url = URL(string: string), url.scheme == "https",
-               url.host?.lowercased() == configuration.webBaseURL.host?.lowercased() {
-                NSWorkspace.shared.open(url)
-            }
+            openPullRequest(worktree)
         case .cancel:
             break
         }
+    }
+
+    /// Opens the worktree's pull request in the browser; only https links on the GitHub web host.
+    func openPullRequest(_ worktree: WorktreeSnapshot) {
+        guard let string = (worktree.pullRequest?.evidence ?? worktree.decision.evidence)?.url,
+              let url = URL(string: string), url.scheme == "https",
+              url.host?.lowercased() == configuration.webBaseURL.host?.lowercased() else { return }
+        NSWorkspace.shared.open(url)
     }
 
     func removeWorktreeManually(_ worktree: WorktreeSnapshot) {

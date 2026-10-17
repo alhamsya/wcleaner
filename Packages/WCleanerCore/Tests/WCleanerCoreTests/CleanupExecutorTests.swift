@@ -150,7 +150,11 @@ final class CleanupExecutorTests: XCTestCase {
         return settings
     }
 
-    private func makeExecutor(git: GitClient = TemporaryGitRepository.client, allowRemoval: Bool = true) -> CleanupExecutor {
+    private func makeExecutor(
+        git: GitClient = TemporaryGitRepository.client,
+        allowRemoval: Bool = true,
+        settings: (@Sendable () async -> AppSettings)? = nil
+    ) -> CleanupExecutor {
         let now = self.now
         let live = self.live!
         return CleanupExecutor(
@@ -160,7 +164,7 @@ final class CleanupExecutorTests: XCTestCase {
             history: history,
             registry: registry,
             policy: DeletionPolicy(allowsRealRemoval: allowRemoval),
-            settings: { live.read() },
+            settings: settings ?? { live.read() },
             now: { now }
         )
     }
@@ -325,14 +329,103 @@ final class CleanupExecutorTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: notes))
     }
 
-    func testSubmoduleConfigurationBlocksRemoval() async throws {
+    /// Commits a submodule entry (`.gitmodules` and a gitlink at `lib`) without cloning anything, and leaves
+    /// `lib` as the empty folder Git creates for a submodule that was never initialized.
+    private func addSubmoduleThatIsNotCheckedOut() throws {
         try fixture.write(".gitmodules", "[submodule \"lib\"]\n\tpath = lib\n\turl = https://example.invalid/lib.git\n", in: worktree)
         try fixture.git(["add", ".gitmodules"], in: worktree)
-        try fixture.git(["commit", "-q", "-m", "Submodule config"], in: worktree)
+        try fixture.git(["update-index", "--add", "--cacheinfo", "160000,\(head!),lib"], in: worktree)
+        try fixture.git(["commit", "-q", "-m", "Submodule"], in: worktree)
+        try FileManager.default.createDirectory(atPath: worktree + "/lib", withIntermediateDirectories: false)
         head = try fixture.head(of: worktree)
         evidence.set(evidence: .success(pullRequest()))
+        XCTAssertEqual(try fixture.git(["status", "--porcelain", "--ignored"], in: worktree), "", "Precondition: clean")
+    }
 
+    func testSubmoduleThatWasNeverCheckedOutDoesNotBlockRemoval() async throws {
+        try addSubmoduleThatIsNotCheckedOut()
+        let outcome = await makeExecutor().execute(request())
+        XCTAssertTrue(outcome.didRemove, "\(outcome)")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: worktree))
+        XCTAssertEqual(try fixture.git(["rev-parse", "--verify", "refs/heads/feature"]), head, "The branch is never deleted")
+    }
+
+    /// Git's status does not look inside a submodule folder without a repository; its files would be lost.
+    func testFilesInsideASubmoduleFolderBlockRemoval() async throws {
+        try addSubmoduleThatIsNotCheckedOut()
+        try fixture.write("lib/notes.txt", "keep\n", in: worktree)
+        XCTAssertEqual(try fixture.git(["status", "--porcelain", "--ignored"], in: worktree), "", "Precondition: Git does not see it")
+
+        assertRefused(await makeExecutor().execute(request())) { $0 == .checkedOutSubmodules(["lib"]) }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: worktree + "/lib/notes.txt"))
+    }
+
+    func testSymbolicLinkAtASubmodulePathBlocksRemoval() async throws {
+        try addSubmoduleThatIsNotCheckedOut()
+        try FileManager.default.removeItem(atPath: worktree + "/lib")
+        try FileManager.default.createSymbolicLink(atPath: worktree + "/lib", withDestinationPath: fixture.repositoryPath)
+        assertRefused(await makeExecutor().execute(request())) { $0 == .checkedOutSubmodules(["lib"]) }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.repositoryPath + "/README.md"))
+    }
+
+    func testSubmoduleRepositoriesInTheWorktreeGitFolderBlockRemoval() async throws {
+        try addSubmoduleThatIsNotCheckedOut()
+        let gitDirectory = try fixture.git(["rev-parse", "--path-format=absolute", "--git-dir"], in: worktree)
+        try FileManager.default.createDirectory(atPath: gitDirectory + "/modules/lib", withIntermediateDirectories: true)
         assertRefused(await makeExecutor().execute(request())) { $0 == .submodules }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: gitDirectory + "/modules/lib"))
+    }
+
+    // MARK: Disposable ignored files
+
+    private func commitGitignore() throws {
+        try fixture.write(".gitignore", "build/\n.env\n", in: worktree)
+        try fixture.git(["add", ".gitignore"], in: worktree)
+        try fixture.git(["commit", "-q", "-m", "Ignore"], in: worktree)
+        head = try fixture.head(of: worktree)
+        evidence.set(evidence: .success(pullRequest()))
+    }
+
+    func testIgnoredFilesMarkedDisposableAreRemovedWithTheWorktree() async throws {
+        try commitGitignore()
+        try fixture.write("build/output.bin", "x", in: worktree)
+        // Only the registry's record counts, not the copy in the request.
+        try await registry.update(id: repository.id) { $0.disposableIgnoredPaths = ["build"] }
+
+        let outcome = await makeExecutor().execute(request())
+        guard case .removed(let entry) = outcome else { return XCTFail("Expected removal, got \(outcome)") }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: worktree))
+        XCTAssertTrue(entry.rationale.contains { $0.contains("marked disposable") && $0.contains("build/") }, "\(entry.rationale)")
+    }
+
+    func testIgnoredFileNotMarkedDisposableStillBlocksRemoval() async throws {
+        try commitGitignore()
+        try fixture.write("build/output.bin", "x", in: worktree)
+        try fixture.write(".env", "SECRET=1\n", in: worktree)
+        try await registry.update(id: repository.id) { $0.disposableIgnoredPaths = ["build"] }
+
+        assertRefused(await makeExecutor().execute(request())) { $0 == .ignoredFiles(1, paths: [".env"]) }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: worktree + "/.env"))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: worktree + "/build/output.bin"))
+    }
+
+    /// The last check uses the repository's list as it is then, not as it was when the check started.
+    func testDisposablePathWithdrawnJustBeforeRemovalBlocksIt() async throws {
+        try commitGitignore()
+        try fixture.write("build/output.bin", "x", in: worktree)
+        try await registry.update(id: repository.id) { $0.disposableIgnoredPaths = ["build"] }
+        let registry = self.registry!, live = self.live!, id = repository.id
+        let reads = ReadCounter()
+        let executor = makeExecutor(settings: {
+            // The third read happens after the deep inspection, right before the final check.
+            if await reads.next() == 3 {
+                try? await registry.update(id: id) { $0.disposableIgnoredPaths = [] }
+            }
+            return live.read()
+        })
+
+        assertRefused(await executor.execute(request())) { if case .ignoredFiles = $0 { true } else { false } }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: worktree + "/build/output.bin"))
     }
 
     func testLockedWorktreeBlocksRemoval() async throws {
@@ -518,5 +611,13 @@ final class CleanupExecutorTests: XCTestCase {
         XCTAssertEqual(removals.first.map(String.init), "-C \(fixture.repositoryPath) worktree remove -- \(worktree!)")
         XCTAssertFalse(invocations.contains { $0.contains("--force") || $0.split(separator: " ").contains("-f") })
         XCTAssertFalse(invocations.contains { $0.contains("clean") || $0.contains("branch -D") || $0.contains("prune") })
+    }
+}
+
+private actor ReadCounter {
+    private var count = 0
+    func next() -> Int {
+        count += 1
+        return count
     }
 }

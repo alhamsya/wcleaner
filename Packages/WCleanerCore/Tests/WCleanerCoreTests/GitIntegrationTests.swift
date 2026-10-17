@@ -95,6 +95,45 @@ final class GitIntegrationTests: XCTestCase {
         XCTAssertTrue(inspection.hasGitmodulesFile)
     }
 
+    func testDeepInspectionTellsEmptySubmoduleFoldersFromCheckedOutOnes() async throws {
+        let path = try fixture.addWorktree("subs", branch: "subs")
+        try fixture.git(["update-index", "--add", "--cacheinfo", "160000,\(try fixture.head(of: path)),vendor/lib"], in: path)
+        try fixture.git(["update-index", "--add", "--cacheinfo", "160000,\(try fixture.head(of: path)),missing"], in: path)
+        try FileManager.default.createDirectory(atPath: path + "/vendor/lib", withIntermediateDirectories: true)
+        let record = WorktreeRecord(path: path, head: try fixture.head(of: path), branchRef: "refs/heads/subs")
+        let common = try fixture.commonDirectory()
+        let inspector = WorktreeInspector(git: git)
+
+        var inspection = await inspector.inspect(record: record, commonDirectory: common, depth: .deep)
+        XCTAssertEqual(inspection.hasGitlinks, true)
+        XCTAssertEqual(inspection.checkedOutSubmodules, [], "An empty or missing folder holds nothing")
+
+        try fixture.write("vendor/lib/.hidden", "x", in: path)
+        inspection = await inspector.inspect(record: record, commonDirectory: common, depth: .deep)
+        XCTAssertEqual(inspection.checkedOutSubmodules, ["vendor/lib"])
+
+        try FileManager.default.removeItem(atPath: path + "/vendor")
+        try FileManager.default.createSymbolicLink(atPath: path + "/vendor", withDestinationPath: fixture.root)
+        try FileManager.default.createDirectory(atPath: fixture.root + "/lib", withIntermediateDirectories: false)
+        inspection = await inspector.inspect(record: record, commonDirectory: common, depth: .deep)
+        XCTAssertEqual(inspection.checkedOutSubmodules, ["vendor/lib"], "A symbolic link on the way is never followed")
+
+        let standard = await inspector.inspect(record: record, commonDirectory: common, depth: .standard)
+        XCTAssertNil(standard.checkedOutSubmodules)
+    }
+
+    func testStatusListsIgnoredPathsRelativeToTheWorktree() async throws {
+        let path = try fixture.addWorktree("ignored", branch: "ignored")
+        try fixture.write(".gitignore", "build/\n*.log\n", in: path)
+        try fixture.git(["add", ".gitignore"], in: path)
+        try fixture.git(["commit", "-q", "-m", "ignore"], in: path)
+        try fixture.write("build/a/out.bin", "x", in: path)
+        try fixture.write("src/debug.log", "x", in: path)
+        let status = try await git.status(worktreePath: path)
+        XCTAssertEqual(status.ignoredPaths.sorted(), ["build/", "src/debug.log"])
+        XCTAssertTrue(status.ignoredPathsComplete)
+    }
+
     func testIndependentRepositoryIsNotALinkedWorktree() async throws {
         let other = try TemporaryGitRepository(name: "other")
         defer { other.cleanup() }

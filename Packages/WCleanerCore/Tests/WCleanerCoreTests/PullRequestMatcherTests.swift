@@ -58,6 +58,8 @@ final class PullRequestMatcherTests: XCTestCase {
         XCTAssertEqual(evidence.state, .merged)
         XCTAssertTrue(evidence.headRepositoryVerified)
         XCTAssertEqual(evidence.accountID, account)
+        XCTAssertEqual(evidence.url, "https://github.com/octo/repo/pull/5")
+        XCTAssertEqual(match.summary, "PR #5 Merged")
     }
 
     func testForkPullRequestUsesUpstreamRemoteAndRenamedBranch() async {
@@ -112,6 +114,7 @@ final class PullRequestMatcherTests: XCTestCase {
         guard case .headMismatch(let evidence, let local) = match else { return XCTFail("Got \(match)") }
         XCTAssertEqual(evidence.number, 5)
         XCTAssertEqual(local, head)
+        XCTAssertEqual(match.summary, "PR #5 Merged, different HEAD")
     }
 
     func testReusedBranchNamePicksTheExactHead() async {
@@ -126,6 +129,7 @@ final class PullRequestMatcherTests: XCTestCase {
         respond(head: "octo:feature", with: [pull(5, merged: false), pull(6)])
         let match = await matcher.match(lookup())
         XCTAssertEqual(match, .ambiguous([5, 6]))
+        XCTAssertEqual(match.summary, "2 possible PRs")
     }
 
     func testPullRequestsToOtherBaseRepositoriesAreIgnored() async {
@@ -133,12 +137,14 @@ final class PullRequestMatcherTests: XCTestCase {
         transport.json(path: "/repos/octo/repo/commits/\(head)/pulls", "[]")
         let match = await matcher.match(lookup())
         XCTAssertEqual(match, .notFound)
+        XCTAssertEqual(match.summary, "No PR")
     }
 
     func testClosedUnmergedIsReportedAsSuch() async {
         respond(head: "octo:feature", with: [pull(5, merged: false)])
         let match = await matcher.match(lookup())
         XCTAssertEqual(match.evidence?.state, .closedUnmerged)
+        XCTAssertEqual(match.summary, "PR #5 Closed Unmerged")
     }
 
     func testErrorsBecomeUnavailableAndUnauthorizedIsReported() async {

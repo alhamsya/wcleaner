@@ -4,13 +4,15 @@ WCleaner is a small native macOS menu bar app. It finds the Git **linked worktre
 
 - Native AppKit, Swift 6 (strict concurrency), macOS 14 Sonoma or later. Apple frameworks only; no Electron, web views, helpers or daemons.
 - Menu bar only (no Dock icon). English UI with System, Light and Dark appearance.
-- Several GitHub.com accounts at once, each signed in with GitHub's device flow and stored in its own Keychain item.
+- Several GitHub.com accounts at once, each signed in with GitHub's device flow and stored in its own Keychain item, or borrowed from an existing GitHub CLI (`gh`) login for organizations where the WCleaner GitHub App is not installed.
 - Dry run by default. WCleaner removes nothing until you allow it, and then only after fresh safety checks.
 
 > **Status: 0.1.0, pre-release, not published.** No signed build, DMG or Homebrew cask has been released. GitHub sign-in works only in builds configured with a GitHub App client ID ([GITHUB_APP_SETUP.md](GITHUB_APP_SETUP.md)). End-to-end use against real GitHub accounts has not been verified yet.
 
 ## What it does
 
+- **Menu:** a summary card (last check, total size, how much passed every safety check, counts per status) above colour-coded worktree rows with their pull request (merged purple, open green, closed red) and size. The menu bar icon shows a short sweep while WCleaner checks and a sparkle after a cleanup; with Reduce Motion it stays still. Each worktree links to its pull request, from the menu and from Settings › Auto Cleanup.
+- **Disposable ignored files:** off by default, so any ignored file keeps a worktree. Per repository you can list exact paths, such as build output or caches, that may be deleted with a worktree. Set them in Settings › Repositories, or choose *Allow Deleting These Ignored Files…* in a worktree's menu to approve exactly the paths Git reported there.
 - **Repositories:** you add repositories explicitly. WCleaner lists their worktrees with `git worktree list --porcelain -z`, shows branch, HEAD, pull request state and estimated size (`du`, cached for about an hour, always labeled as an estimate).
 - **Accounts:** each repository is matched to a verified GitHub account. With exactly one account that can see the repository it is assigned automatically; with several you choose; with none it shows *Needs Account*. WCleaner never silently switches accounts.
 - **Pull requests:** matched by repository ID, branch, head repository and exact head commit. Only `merged_at` counts as merged; closed-but-unmerged and ambiguous matches are never cleaned.
@@ -23,7 +25,7 @@ WCleaner is a small native macOS menu bar app. It finds the Git **linked worktre
 A linked worktree is removed only when **all** of these hold, re-checked immediately before removal with fresh data from Git and GitHub:
 
 1. It is a linked worktree of an enrolled repository: not the primary worktree, not bare, locked, prunable, detached, nested, symlinked or otherwise ambiguous.
-2. It has no staged, unstaged, untracked or **ignored** files. It has no files flagged skip-worktree or assume-unchanged, no refs that exist only in that worktree, no nested folders named `.git`, and no submodules. No merge, rebase, cherry-pick, revert or bisect is in progress.
+2. It has no staged, unstaged or untracked files, and no **ignored** files except in paths you marked as disposable for that repository (for example `build` or `node_modules`). It has no files flagged skip-worktree or assume-unchanged, no refs that exist only in that worktree, no nested folders named `.git`, and no checked-out submodules. A submodule that was never checked out is an empty folder and does not block. No merge, rebase, cherry-pick, revert or bisect is in progress.
 3. Its HEAD is exactly the pull request's head commit, so there are no unpublished local commits.
 4. The repository identity, account, pull request and merge are verified. Any `401`, `403`, `404`, network error or rate limit blocks cleanup.
 5. The merge happened after enrollment and consent, or you reviewed that exact pull request and commit.

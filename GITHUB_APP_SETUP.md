@@ -24,7 +24,7 @@ A GitHub App gives read-only, fine-grained access, unlike an OAuth App's broad `
 
 A GitHub App user token can reach only repositories where the app is **installed**, and only what both you and the app may access. Install the app (app page › **Install App**) on your user account and on each organization whose repositories you add, choosing *All repositories* or the specific ones. Organizations may require an owner's approval.
 
-If a repository shows *Needs Account* or "no access" although you can see it on github.com, the app is usually not installed for that owner.
+If a repository shows *Needs Account* or "no access" although you can see it on github.com, the app is usually not installed for that owner. If you cannot install it there (for example in an organization you do not own), use a GitHub CLI login instead (below).
 
 ### Token expiration
 
@@ -54,6 +54,16 @@ Settings › **Accounts** › **Add Account…** shows a code. Click **Open GitH
 
 Repository assignment: when exactly one connected account can read a repository it is assigned automatically; with several you pick one in Settings › Repositories; if the assigned account later loses access or is disconnected, the repository shows *Account Unavailable* and is not cleaned until you choose again.
 
+## Alternative: GitHub CLI login (no app installation needed)
+
+If [GitHub CLI](https://cli.github.com) is installed (`/opt/homebrew/bin/gh` or `/usr/local/bin/gh`) and logged in (`gh auth login`), Settings › Accounts › **Use GitHub CLI Login…** lists its GitHub.com accounts. Pick one and WCleaner:
+
+- verifies it with `GET /user` and shows it as **Connected** (Token column: *From GitHub CLI*);
+- stores **no** token: it runs `gh auth token --hostname github.com --user <login>` when it checks, keeps the token in memory for up to 5 minutes, and re-checks the user ID each time it reads a new one;
+- reaches every repository that GitHub CLI can reach, including organization repositories where the WCleaner GitHub App is not installed (GitHub CLI is usually already authorized there).
+
+This works even in builds without a client ID. GitHub CLI tokens normally have the `repo` scope (read **and** write); WCleaner only reads. If you run `gh auth logout`, or `gh` starts returning a token for a different user, the account shows **Needs Reconnect**. **Disconnect…** only removes WCleaner's record; GitHub CLI stays logged in. Signing in to the same GitHub user with the device flow later switches the account back (and vice versa; switching to GitHub CLI deletes that account's WCleaner Keychain items).
+
 ## Alternative: OAuth App
 
 An OAuth App with **Enable Device Flow** also works (client ID without the `Iv` prefix). WCleaner then requests the `repo` scope, which grants read **and write** access to all your private repositories. That is broader than WCleaner needs, so prefer a GitHub App.
@@ -63,7 +73,8 @@ An OAuth App with **Enable Device Flow** also works (client ID without the `Iv` 
 | Data | Location |
 | --- | --- |
 | Access token, refresh token | macOS Keychain, one generic-password item per account and token type (services `<bundle id>.github.access-token` / `.refresh-token`), this device only, not synced |
-| Account login, numeric user ID, token expiry dates | `~/Library/Application Support/WCleaner/accounts.json` (no secrets) |
+| Account login, numeric user ID, token expiry dates, token source (device flow or GitHub CLI) | `~/Library/Application Support/WCleaner/accounts.json` (no secrets) |
+| GitHub CLI account tokens | Not stored by WCleaner; read from `gh` when needed and kept in memory for up to 5 minutes |
 | Repository-to-account assignments | `~/Library/Application Support/WCleaner/account-mappings.json` |
 
 Network access goes only to `https://github.com` (device flow) and `https://api.github.com` (REST API version 2022-11-28).

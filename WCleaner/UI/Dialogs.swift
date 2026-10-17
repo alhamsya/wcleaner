@@ -97,6 +97,11 @@ enum Dialogs {
             lines.append("Pull request #\(evidence.number) is merged.")
         }
         lines.append("Estimated size: \(worktree.diskUsage.displayString)")
+        for reason in worktree.decision.reasons {
+            if case .disposableIgnoredFiles(let paths) = reason {
+                lines.append("Ignored files you marked as disposable are deleted with it: \(EligibilityReason.list(paths, limit: 10)).")
+            }
+        }
         lines.append("")
         lines.append("WCleaner checks everything again with fresh data from Git and GitHub, then runs “git worktree remove” without --force. "
             + "If anything changed, nothing is removed. The branch and its commits stay in the repository.")
@@ -140,13 +145,52 @@ enum Dialogs {
     }
 
     static func confirmDisconnect(_ account: GitHubAccount, assignedRepositories: [String]) -> Bool {
-        var message = "Its token is deleted from the Keychain on this Mac. Other accounts are not affected."
+        var message = account.source == .gitHubCLI
+            ? "WCleaner stops using this account. GitHub CLI stays logged in; WCleaner never stored its token. Other accounts are not affected."
+            : "Its token is deleted from the Keychain on this Mac. Other accounts are not affected."
         if !assignedRepositories.isEmpty {
             message += "\n\nThese repositories use this account and will stop being checked until you assign another account: "
                 + assignedRepositories.joined(separator: ", ") + "."
         }
-        message += "\n\nTo revoke access completely, also remove WCleaner on GitHub under Settings › Applications."
+        if account.source == .deviceFlow {
+            message += "\n\nTo revoke access completely, also remove WCleaner on GitHub under Settings › Applications."
+        }
         return confirm(title: "Disconnect \(account.displayName)?", message: message, action: "Disconnect", destructive: true)
+    }
+
+    /// Lets the user pick one of GitHub CLI's logged-in accounts. Returns the chosen login.
+    static func chooseGitHubCLIAccount(_ accounts: [GitHubCLIAccount], preselect: String? = nil) -> String? {
+        let usable = accounts.filter(\.isUsable)
+        guard !usable.isEmpty else {
+            showError(
+                "No GitHub CLI Account to Use",
+                accounts.isEmpty
+                    ? "GitHub CLI is not logged in to GitHub.com. Run “gh auth login” in Terminal, then try again."
+                    : "GitHub CLI reports a problem with every account. Run “gh auth status” in Terminal for details, log in again with “gh auth login”, then try again."
+            )
+            return nil
+        }
+        let alert = NSAlert()
+        alert.messageText = "Use a GitHub CLI Login"
+        alert.informativeText = "WCleaner will ask GitHub CLI (gh) for this account's token whenever it checks repositories. "
+            + "WCleaner does not copy or store that token, and only reads repository and pull request information. "
+            + "Use this for organizations where the WCleaner GitHub App is not installed.\n\n"
+            + "Note: GitHub CLI tokens usually carry the broad “repo” scope (read and write)."
+        let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 280, height: 26), pullsDown: false)
+        for account in usable {
+            popup.addItem(withTitle: "@" + account.login + (account.isActive ? " (active in gh)" : ""))
+            popup.lastItem?.representedObject = account.login
+        }
+        if let preselect, let index = usable.firstIndex(where: { $0.login.caseInsensitiveCompare(preselect) == .orderedSame }) {
+            popup.selectItem(at: index)
+        }
+        popup.setAccessibilityLabel("GitHub CLI account")
+        alert.accessoryView = popup
+        alert.addButton(withTitle: "Use Account")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        return popup.selectedItem?.representedObject as? String
     }
 
     static func confirmClearHistory() -> Bool {
@@ -165,6 +209,67 @@ enum Dialogs {
     }
 
     // MARK: Information
+
+    /// Asks before treating these ignored paths as disposable in every worktree of the repository.
+    static func confirmDisposableIgnoredFiles(_ paths: [String], repositoryName: String) -> Bool {
+        let shown = paths.prefix(20).map { "• " + $0 }.joined(separator: "\n")
+        let more = paths.count > 20 ? "\n• and \(paths.count - 20) more" : ""
+        return confirm(
+            title: "Allow Deleting These Ignored Files?",
+            message: "In every worktree of “\(repositoryName)”, these ignored files and folders will no longer keep the worktree:\n\n"
+                + shown + more + "\n\n"
+                + "When such a worktree is removed, Git deletes them with it and they cannot be recovered. Only add build output, "
+                + "caches and other files you can recreate, never secrets or settings such as .env. Any other ignored file still "
+                + "keeps a worktree. You can change the list in Settings › Repositories.",
+            action: "Allow Deleting",
+            destructive: true
+        )
+    }
+
+    /// Edits a repository's disposable ignored paths, one per line. Returns the normalized list, or nil when
+    /// cancelled or when a line is not an exact relative path.
+    static func editDisposableIgnoredPaths(_ current: [String], repositoryName: String) -> [String]? {
+        let alert = NSAlert()
+        alert.messageText = "Disposable Ignored Files for “\(repositoryName)”"
+        alert.informativeText = "Ignored files and folders listed here may be deleted together with a worktree. Write one path per "
+            + "line, relative to the worktree’s top folder, exactly as it appears in the worktree (for example “build” or "
+            + "“app/node_modules”). Each entry covers that file or folder and everything inside it; wildcards are not allowed. "
+            + "Every other ignored file still keeps a worktree."
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 360, height: 140))
+        scroll.hasVerticalScroller = true
+        scroll.borderType = .bezelBorder
+        let text = NSTextView(frame: scroll.contentView.bounds)
+        text.autoresizingMask = [.width]
+        text.isRichText = false
+        text.isAutomaticQuoteSubstitutionEnabled = false
+        text.isAutomaticDashSubstitutionEnabled = false
+        text.isAutomaticTextReplacementEnabled = false
+        text.isAutomaticSpellingCorrectionEnabled = false
+        text.font = .monospacedSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
+        text.string = current.joined(separator: "\n")
+        text.setAccessibilityLabel("Disposable ignored paths, one per line")
+        scroll.documentView = text
+        alert.accessoryView = scroll
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel").keyEquivalent = "\u{1b}"
+        NSApp.activate()
+        alert.window.initialFirstResponder = text
+        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+
+        let lines = text.string.split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        let invalid = lines.filter { DisposablePaths.normalize($0) == nil }
+        guard invalid.isEmpty else {
+            showError(
+                "List Not Saved",
+                "These lines are not exact relative paths: \(invalid.prefix(5).joined(separator: ", "))\(invalid.count > 5 ? ", …" : ""). "
+                    + "Leave out wildcards, “..”, “.git” and empty folder names."
+            )
+            return nil
+        }
+        return DisposablePaths.normalizedList(lines)
+    }
 
     static func showError(_ title: String, _ message: String) {
         let alert = NSAlert()

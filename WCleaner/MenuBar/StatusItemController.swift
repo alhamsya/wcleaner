@@ -10,6 +10,18 @@ final class StatusItemController: NSObject, NSMenuDelegate, StatusMenuTarget {
     private let model: AppModel
     private var observation: AppModel.Token?
     private var showsAttention = false
+    private let animator = StatusIconAnimator()
+    /// The summary card of the open menu, refreshed in place while the menu stays open.
+    private weak var openSummaryView: MenuSummaryView?
+    /// What the open menu's repository rows were built from; they are rebuilt when it changes.
+    private var shownBody: BodyInputs?
+
+    private struct BodyInputs: Equatable {
+        var repositories: [RepositorySnapshot]
+        var lastScanError: String?
+        var gitAvailable: Bool
+        var accounts: [GitHubAccount]
+    }
 
     init(model: AppModel) {
         self.model = model
@@ -23,29 +35,35 @@ final class StatusItemController: NSObject, NSMenuDelegate, StatusMenuTarget {
         menu.delegate = self
         menu.autoenablesItems = false
         statusItem.menu = menu
+        animator.onFrame = { [weak self] _ in self?.renderIcon() }
         observation = model.observe { [weak self] change in
+            guard let self else { return }
+            if change == .snapshot || change == .repositories {
+                // Nothing moves when there is nothing to check.
+                animator.setChecking(model.snapshot.isScanning && !model.repositories.isEmpty)
+            }
             if change == .snapshot || change == .accounts || change == .system {
-                self?.updateIcon()
+                updateIcon()
+            }
+            if change == .snapshot || change == .settings {
+                openSummaryView?.apply(MenuSummary(snapshot: model.snapshot, settings: model.settings, now: Date()))
+            }
+            if openSummaryView != nil, change == .snapshot || change == .accounts || change == .system {
+                refreshOpenMenuBody()
             }
         }
     }
 
-    func invalidate() {
-        NSStatusBar.system.removeStatusItem(statusItem)
+    private var bodyInputs: BodyInputs {
+        BodyInputs(
+            repositories: model.snapshot.repositories,
+            lastScanError: model.snapshot.lastScanError,
+            gitAvailable: model.gitAvailable,
+            accounts: model.accounts
+        )
     }
 
-    private func updateIcon() {
-        let attention = model.snapshot.needsAttention || !model.gitAvailable
-            || model.accounts.contains { !$0.state.isConnected }
-        guard attention != showsAttention, let button = statusItem.button else { return }
-        showsAttention = attention
-        button.image = StatusIcon.image(attention ? .attention : .normal)
-        button.setAccessibilityLabel(attention ? "WCleaner, needs attention" : "WCleaner")
-    }
-
-    // MARK: NSMenuDelegate
-
-    func menuNeedsUpdate(_ menu: NSMenu) {
+    private func makeBuilder() -> StatusMenuBuilder {
         StatusMenuBuilder(
             snapshot: model.snapshot,
             settings: model.settings,
@@ -54,7 +72,55 @@ final class StatusItemController: NSObject, NSMenuDelegate, StatusMenuTarget {
             gitDescription: model.gitDescription,
             now: Date(),
             target: self
-        ).populate(menu)
+        )
+    }
+
+    /// Rebuilds the repository rows of the open menu, e.g. when a check started from the menu finished.
+    private func refreshOpenMenuBody() {
+        let inputs = bodyInputs
+        guard inputs != shownBody else { return }
+        if makeBuilder().replaceBody(in: menu) { shownBody = inputs }
+    }
+
+    func invalidate() {
+        animator.stop()
+        NSStatusBar.system.removeStatusItem(statusItem)
+    }
+
+    /// Plays the short sparkle on the menu bar icon after a worktree was removed.
+    func celebrateCleanup() {
+        animator.playSparkle()
+    }
+
+    private func updateIcon() {
+        let attention = model.snapshot.needsAttention || !model.gitAvailable
+            || model.accounts.contains { !$0.state.isConnected }
+        guard attention != showsAttention else { return }
+        showsAttention = attention
+        renderIcon()
+    }
+
+    private func renderIcon() {
+        guard let button = statusItem.button else { return }
+        let image = StatusIcon.image(showsAttention ? .attention : .normal, effect: animator.effect)
+        button.image = image
+        button.setAccessibilityLabel(image.accessibilityDescription)
+    }
+
+    // MARK: NSMenuDelegate
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        openSummaryView = makeBuilder().populate(menu)
+        shownBody = bodyInputs
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        openSummaryView?.playEntrance()
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        openSummaryView = nil
+        shownBody = nil
     }
 
     // MARK: StatusMenuTarget
@@ -96,5 +162,10 @@ final class StatusItemController: NSObject, NSMenuDelegate, StatusMenuTarget {
     func removeWorktree(_ sender: NSMenuItem) {
         guard let worktree = sender.representedObject as? WorktreeSnapshot else { return }
         model.actions?.removeWorktreeManually(worktree)
+    }
+
+    func allowDisposableIgnoredFiles(_ sender: NSMenuItem) {
+        guard let worktree = sender.representedObject as? WorktreeSnapshot else { return }
+        model.actions?.allowDisposableIgnoredFiles(worktree)
     }
 }

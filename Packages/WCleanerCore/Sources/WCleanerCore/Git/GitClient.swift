@@ -227,7 +227,9 @@ public struct GitClient: Sendable {
                 // No fsmonitor or untracked cache: a stale cache must never hide a file.
                 "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false",
                 "status", "--porcelain=v2", "-z", "--branch",
-                "--untracked-files=normal", "--ignored=traditional", "--ignore-submodules=none",
+                // `matching` lists exactly what an ignore rule matched (`build/`, `src/debug.log`), never a
+                // parent folder that merely happens to hold only ignored files.
+                "--untracked-files=normal", "--ignored=matching", "--ignore-submodules=none",
             ],
             in: worktreePath,
             timeout: timeout,
@@ -248,7 +250,9 @@ public struct GitClient: Sendable {
     /// What the worktree's index says beyond `git status`.
     public struct IndexScan: Sendable, Equatable {
         /// Gitlink (submodule) entries, mode 160000.
-        public var hasGitlinks: Bool
+        public var hasGitlinks: Bool { !gitlinkPaths.isEmpty }
+        /// Paths of the gitlink entries, relative to the worktree root.
+        public var gitlinkPaths: [String]
         /// Paths whose changes `git status` may not report: skip-worktree (`S`, also used by sparse
         /// checkout), assume-unchanged (lowercase tags) or any tag other than a plain cached `H`.
         /// Each path counts once, also when it has several merge stages.
@@ -263,7 +267,7 @@ public struct GitClient: Sendable {
             timeout: .seconds(60),
             maxOutputBytes: 64 * 1024 * 1024
         )
-        var scan = IndexScan(hasGitlinks: false, hiddenEntryCount: 0)
+        var scan = IndexScan(gitlinkPaths: [], hiddenEntryCount: 0)
         var hiddenPaths = Set<Data>()
         let space = UInt8(ascii: " ")
         let tab = UInt8(ascii: "\t")
@@ -272,11 +276,15 @@ public struct GitClient: Sendable {
             guard fields.count == 3, fields[0].count == 1, let tabIndex = fields[2].firstIndex(of: tab) else {
                 throw GitError.malformedOutput("ls-files -v -s")
             }
+            let path = Data(fields[2][fields[2].index(after: tabIndex)...])
             if fields[0].first != UInt8(ascii: "H") {
-                hiddenPaths.insert(Data(fields[2][fields[2].index(after: tabIndex)...]))
+                hiddenPaths.insert(path)
             }
             if fields[1].elementsEqual("160000".utf8) {
-                scan.hasGitlinks = true
+                guard let text = String(data: path, encoding: .utf8), !text.isEmpty else {
+                    throw GitError.malformedOutput("ls-files -v -s")
+                }
+                if !scan.gitlinkPaths.contains(text) { scan.gitlinkPaths.append(text) }
             }
         }
         scan.hiddenEntryCount = hiddenPaths.count

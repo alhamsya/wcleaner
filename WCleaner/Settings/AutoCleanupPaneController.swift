@@ -9,11 +9,13 @@ final class AutoCleanupPaneController: SettingsPaneViewController {
     private let consentLabel = UIFactory.note("")
     private let buildLabel = UIFactory.note("", color: .systemOrange)
     private var consentButton: NSButton!
+    private var openPullRequestButton: NSButton!
     private let table = SimpleTable(
         columns: [
-            .init(title: "Worktree", width: 190),
-            .init(title: "Decision", width: 140),
-            .init(title: "Reason", width: 250),
+            .init(title: "Worktree", width: 170),
+            .init(title: "Pull Request", width: 120),
+            .init(title: "Decision", width: 110),
+            .init(title: "Reason", width: 180),
         ],
         accessibilityLabel: "Dry-run cleanup decisions",
         height: 170
@@ -37,10 +39,17 @@ final class AutoCleanupPaneController: SettingsPaneViewController {
         addFullWidth(UIFactory.note(SafetyRulesText.summary))
 
         addSection("Dry Run")
-        addFullWidth(UIFactory.note("What WCleaner would do with each linked worktree right now. Nothing is removed from this list."))
+        addFullWidth(UIFactory.note("What WCleaner would do with each linked worktree right now. Nothing is removed from this list. "
+            + "Double-click a row for all reasons."))
         addFullWidth(table.scrollView)
         table.onDoubleClick = { [weak self] row in self?.showDetails(for: row.id) }
-        stack.addArrangedSubview(UIFactory.button("Check Now", target: self, action: #selector(checkNow)))
+        table.onSelectionChange = { [weak self] _ in self?.updateOpenPullRequestButton() }
+        openPullRequestButton = UIFactory.button("Open Pull Request", target: self, action: #selector(openSelectedPullRequest))
+        openPullRequestButton.toolTip = "Opens the selected worktree's pull request on GitHub."
+        stack.addArrangedSubview(UIFactory.hStack([
+            UIFactory.button("Check Now", target: self, action: #selector(checkNow)),
+            openPullRequestButton,
+        ]))
     }
 
     override func refresh() {
@@ -71,28 +80,60 @@ final class AutoCleanupPaneController: SettingsPaneViewController {
                     id: worktree.path,
                     cells: [
                         "\(repository.repository.displayName) · \(worktree.branch ?? worktree.name)",
+                        Self.pullRequestText(worktree),
                         worktree.decision.title,
                         worktree.decision.summary,
                     ],
                     toolTip: worktree.decision.reasons.map(\.message).joined(separator: "\n"),
-                    secondary: [false, false, true]
+                    secondary: [false, false, false, true]
                 )
             }
         })
+        updateOpenPullRequestButton()
     }
 
     override func shouldRefresh(for change: AppModel.Change) -> Bool {
         change == .settings || change == .snapshot || change == .system
     }
 
+    private static func pullRequestText(_ worktree: WorktreeSnapshot) -> String {
+        worktree.pullRequest?.summary ?? "Not checked"
+    }
+
+    private func worktree(for path: String?) -> WorktreeSnapshot? {
+        guard let path else { return nil }
+        return model.snapshot.allLinkedWorktrees.first { $0.path == path }
+    }
+
+    private func updateOpenPullRequestButton() {
+        openPullRequestButton.isEnabled = worktree(for: table.selectedRow?.id)?.pullRequest?.evidence != nil
+    }
+
+    @objc private func openSelectedPullRequest() {
+        guard let worktree = worktree(for: table.selectedRow?.id) else { return }
+        model.actions?.openPullRequest(worktree)
+    }
+
     private func showDetails(for path: String) {
-        guard let worktree = model.snapshot.allLinkedWorktrees.first(where: { $0.path == path }) else { return }
+        guard let worktree = worktree(for: path), let window = view.window else { return }
+        var lines = [worktree.path]
+        if let evidence = worktree.pullRequest?.evidence {
+            lines.append("Pull request #\(evidence.number): \(evidence.title) (\(evidence.state.title))")
+        } else {
+            lines.append("Pull request: \(Self.pullRequestText(worktree))")
+        }
+        lines += worktree.decision.reasons.map { "• \($0.message)" }
         let alert = NSAlert()
         alert.messageText = "\(worktree.branch ?? worktree.name): \(worktree.decision.title)"
-        alert.informativeText = ([worktree.path] + worktree.decision.reasons.map { "• \($0.message)" }).joined(separator: "\n")
+        alert.informativeText = lines.joined(separator: "\n")
         alert.addButton(withTitle: "OK")
-        if let window = view.window {
-            alert.beginSheetModal(for: window)
+        let canOpen = worktree.pullRequest?.evidence != nil
+        if canOpen { alert.addButton(withTitle: "Open Pull Request") }
+        Task { [weak self] in
+            let response = await alert.beginSheetModal(for: window)
+            if canOpen, response == .alertSecondButtonReturn {
+                self?.model.actions?.openPullRequest(worktree)
+            }
         }
     }
 

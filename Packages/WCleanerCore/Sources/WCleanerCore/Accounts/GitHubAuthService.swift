@@ -45,11 +45,16 @@ public actor GitHubAuthService {
     private let api: GitHubAPIClient
     private let accounts: GitHubAccountStore
     private let credentials: any CredentialStore
+    private let gitHubCLI: GitHubCLI?
     private let now: @Sendable () -> Date
     private var refreshes: [AccountID: Task<String, any Error>] = [:]
+    /// GitHub CLI tokens kept in memory only, briefly, so a check does not start `gh` for every request.
+    private var cliTokens: [AccountID: (token: String, fetchedAt: Date)] = [:]
 
     /// Tokens are renewed this long before they expire.
     static let refreshMargin: TimeInterval = 120
+    /// How long a token read from GitHub CLI is reused before asking `gh` (and GitHub) again.
+    static let cliTokenLifetime: TimeInterval = 300
 
     public init(
         configuration: GitHubConfiguration,
@@ -57,6 +62,7 @@ public actor GitHubAuthService {
         api: GitHubAPIClient,
         accounts: GitHubAccountStore,
         credentials: any CredentialStore,
+        gitHubCLI: GitHubCLI? = nil,
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.configuration = configuration
@@ -64,6 +70,7 @@ public actor GitHubAuthService {
         self.api = api
         self.accounts = accounts
         self.credentials = credentials
+        self.gitHubCLI = gitHubCLI
         self.now = now
     }
 
@@ -120,10 +127,96 @@ public actor GitHubAuthService {
         return existing == nil ? .added(account) : .updated(account)
     }
 
-    /// Removes one account's tokens and metadata. Other accounts are untouched.
+    // MARK: GitHub CLI accounts
+
+    /// The accounts GitHub CLI is logged in to on this Mac.
+    public func gitHubCLIAccounts() async throws -> [GitHubCLIAccount] {
+        guard let gitHubCLI else { throw GitHubCLIError.notInstalled }
+        return try await gitHubCLI.accounts()
+    }
+
+    /// Connects (or reconnects) an account whose token WCleaner borrows from GitHub CLI. The identity is
+    /// verified with `GET /user`; no token is stored. A device-flow account for the same GitHub user is
+    /// switched over and its own Keychain items are deleted first.
+    public func connectGitHubCLI(login: String, expecting: AccountID? = nil) async throws -> SignInResult {
+        guard let gitHubCLI else { throw GitHubCLIError.notInstalled }
+        let token = try await gitHubCLI.token(for: login)
+        let user: GitHubUserDTO
+        do {
+            user = try await api.currentUser(token: token)
+        } catch {
+            throw GitHubAuthError.verificationFailed(error.userMessage)
+        }
+        guard user.login.caseInsensitiveCompare(login) == .orderedSame else {
+            throw GitHubAuthError.verificationFailed("GitHub CLI returned a token for @\(user.login) instead of @\(login).")
+        }
+        let id = AccountID(host: configuration.host, userID: user.id)
+        if let expecting, expecting != id {
+            let expectedLogin = await accounts.account(expecting)?.login ?? String(expecting.userID)
+            throw GitHubAuthError.differentAccount(expected: expectedLogin, actual: user.login)
+        }
+
+        let existing = await accounts.account(id)
+        if existing?.source == .deviceFlow {
+            refreshes[id]?.cancel()
+            refreshes[id] = nil
+            do {
+                try credentials.delete(for: id)
+            } catch {
+                throw GitHubAuthError.credentialStorage(error.userMessage)
+            }
+        }
+        let timestamp = now()
+        let account = GitHubAccount(
+            id: id,
+            login: user.login,
+            name: user.name,
+            addedAt: existing?.addedAt ?? timestamp,
+            lastVerifiedAt: timestamp,
+            state: .connected,
+            source: .gitHubCLI
+        )
+        try await accounts.upsert(account)
+        cliTokens[id] = (token, timestamp)
+        await api.clearCache(for: id)
+        return existing == nil ? .added(account) : .updated(account)
+    }
+
+    /// Asks GitHub CLI for this account's token and confirms it still belongs to the same GitHub user.
+    private func gitHubCLIToken(for account: GitHubAccount) async throws -> String {
+        if let cached = cliTokens[account.id], now().timeIntervalSince(cached.fetchedAt) < Self.cliTokenLifetime {
+            return cached.token
+        }
+        guard let gitHubCLI, gitHubCLI.executablePath != nil else {
+            let reason = "GitHub CLI (gh) is no longer installed."
+            try await markNeedsReconnect(account.id, reason: reason)
+            throw GitHubAuthError.needsReconnect(reason)
+        }
+        let token: String
+        do {
+            token = try await gitHubCLI.token(for: account.login)
+        } catch let error as GitHubCLIError {
+            let reason = "GitHub CLI has no token for @\(account.login). Run “gh auth login”, then reconnect."
+            try await markNeedsReconnect(account.id, reason: reason)
+            throw GitHubAuthError.needsReconnect(error.localizedDescription)
+        }
+        // Network errors here are passed on unchanged: the check fails, the account stays connected.
+        let user = try await api.currentUser(token: token, account: account.id)
+        guard user.id == account.id.userID else {
+            let reason = "GitHub CLI now returns a token for @\(user.login)."
+            try await markNeedsReconnect(account.id, reason: reason)
+            throw GitHubAuthError.needsReconnect(reason)
+        }
+        cliTokens[account.id] = (token, now())
+        return token
+    }
+
+    /// Removes one account's tokens and metadata. Other accounts are untouched. For a GitHub CLI account
+    /// only WCleaner's record is removed; GitHub CLI stays logged in.
     public func disconnect(_ id: AccountID) async throws {
         refreshes[id]?.cancel()
         refreshes[id] = nil
+        cliTokens[id] = nil
         try credentials.delete(for: id)
         try await accounts.remove(id)
         await api.clearCache(for: id)
@@ -134,6 +227,9 @@ public actor GitHubAuthService {
         guard let account = await accounts.account(id) else { throw GitHubAuthError.accountNotFound }
         if case .needsReconnect(let reason) = account.state {
             throw GitHubAuthError.needsReconnect(reason)
+        }
+        if account.source == .gitHubCLI {
+            return try await gitHubCLIToken(for: account)
         }
         let stored: StoredCredentials?
         do {
@@ -154,10 +250,12 @@ public actor GitHubAuthService {
 
     /// Called when GitHub answers 401 for this account's token.
     public func handleUnauthorized(_ id: AccountID) async {
+        cliTokens[id] = nil
         try? await markNeedsReconnect(id, reason: "GitHub rejected its token.")
     }
 
     public func markNeedsReconnect(_ id: AccountID, reason: String) async throws {
+        cliTokens[id] = nil
         try await accounts.update(id) { $0.state = .needsReconnect(reason: reason) }
     }
 

@@ -15,7 +15,10 @@ public enum EligibilityReason: Sendable, Hashable {
     case notALinkedWorktree(String)
     case containsOtherWorktree(String)
     case containsRepositoryData
+    /// The worktree's own Git directory stores submodule repositories (`modules/`); Git would delete them.
     case submodules
+    /// Submodules whose folders hold files in this worktree; those files would be deleted.
+    case checkedOutSubmodules([String])
 
     // Local content
     case statusUnavailable(String)
@@ -23,7 +26,11 @@ public enum EligibilityReason: Sendable, Hashable {
     case unstagedChanges(Int)
     case unmergedChanges(Int)
     case untrackedFiles(Int)
-    case ignoredFiles(Int)
+    /// Ignored files and folders that are not on the repository's list of disposable paths. `paths` lists
+    /// those Git reported (it can be shorter than the count when Git reported very many).
+    case ignoredFiles(Int, paths: [String] = [])
+    /// Informational: ignored files the user marked as disposable for this repository, deleted with the worktree.
+    case disposableIgnoredFiles([String])
     case submoduleChanges(Int)
     case operationInProgress(String)
     /// Files marked skip-worktree or assume-unchanged: Git hides their changes from `status`.
@@ -77,7 +84,7 @@ public enum EligibilityReason: Sendable, Hashable {
         switch self {
         case .mergedBeforeEnrollment:
             .review
-        case .waitingForDelay, .cleanupConsentMissing, .automaticCleanupOff, .automaticCleanupPaused:
+        case .waitingForDelay, .cleanupConsentMissing, .automaticCleanupOff, .automaticCleanupPaused, .disposableIgnoredFiles:
             .info
         default:
             .blocking
@@ -101,13 +108,20 @@ public enum EligibilityReason: Sendable, Hashable {
         case .notALinkedWorktree(let detail): "The directory could not be confirmed as a linked worktree of this repository. \(detail)"
         case .containsOtherWorktree(let path): "Another worktree is nested inside this one: \(path)"
         case .containsRepositoryData: "The repository's primary worktree or Git directory is inside this worktree."
-        case .submodules: "The worktree contains submodules."
+        case .submodules: "Submodule repositories are stored in this worktree's Git folder (modules); Git would delete them."
+        case .checkedOutSubmodules(let paths):
+            "\(paths.count == 1 ? "A submodule is" : "Submodules are") checked out in this worktree and \(paths.count == 1 ? "its" : "their") files would be deleted: \(Self.list(paths))."
         case .statusUnavailable(let detail): "Local changes could not be checked: \(detail)"
         case .stagedChanges(let count): "\(count) staged change\(count == 1 ? "" : "s") would be lost."
         case .unstagedChanges(let count): "\(count) unstaged change\(count == 1 ? "" : "s") would be lost."
         case .unmergedChanges(let count): "\(count) unresolved merge conflict\(count == 1 ? "" : "s")."
         case .untrackedFiles(let count): "\(count) untracked file\(count == 1 ? "" : "s") or folder\(count == 1 ? "" : "s") would be lost."
-        case .ignoredFiles(let count): "\(count) ignored file\(count == 1 ? "" : "s") or folder\(count == 1 ? "" : "s") (for example build output or .env) would be lost."
+        case .ignoredFiles(let count, let paths):
+            paths.isEmpty
+                ? "\(count) ignored file\(count == 1 ? "" : "s") or folder\(count == 1 ? "" : "s") (for example build output or .env) would be lost."
+                : "\(count) ignored file\(count == 1 ? "" : "s") or folder\(count == 1 ? "" : "s") would be lost: \(Self.list(paths, total: count))."
+        case .disposableIgnoredFiles(let paths):
+            "Ignored files you marked as disposable for this repository are deleted with it: \(Self.list(paths))."
         case .submoduleChanges(let count): "\(count) submodule\(count == 1 ? " has" : "s have") local changes."
         case .operationInProgress(let operation): "A \(operation) is in progress in this worktree."
         case .hiddenIndexEntries(let count):
@@ -163,5 +177,14 @@ public enum EnglishDateFormat {
         let hours = minutes / 60
         if hours < 24 { return "\(hours) hr ago" }
         return dateTime.format(date)
+    }
+}
+
+extension EligibilityReason {
+    /// "a, b, c and 4 more"
+    public static func list(_ items: [String], total: Int? = nil, limit: Int = 5) -> String {
+        let shown = items.prefix(limit).joined(separator: ", ")
+        let remaining = max(total ?? items.count, items.count) - min(items.count, limit)
+        return remaining > 0 ? "\(shown) and \(remaining) more" : shown
     }
 }

@@ -53,9 +53,12 @@ protocol AppActions: AnyObject {
     func removeRepository(_ id: UUID)
     func assignAccount(_ account: AccountID, to repository: UUID)
     func setPullRequestRemote(_ remote: String?, for repository: UUID)
+    func editDisposableIgnoredPaths(for repository: UUID)
+    func allowDisposableIgnoredFiles(_ worktree: WorktreeSnapshot)
     func refreshDiskUsage()
 
     func addAccount()
+    func addGitHubCLIAccount()
     func reconnectAccount(_ id: AccountID)
     func disconnectAccount(_ id: AccountID)
 
@@ -63,6 +66,7 @@ protocol AppActions: AnyObject {
     func revokeCleanupConsent()
     func reviewWorktree(_ worktree: WorktreeSnapshot)
     func removeWorktreeManually(_ worktree: WorktreeSnapshot)
+    func openPullRequest(_ worktree: WorktreeSnapshot)
 
     func setLaunchAtLogin(_ enabled: Bool)
     func openLoginItemsSettings()

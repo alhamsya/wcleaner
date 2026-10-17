@@ -14,6 +14,7 @@ final class AccountsPaneController: SettingsPaneViewController {
         height: 170
     )
     private var addButton: NSButton!
+    private var cliButton: NSButton!
     private var reconnectButton: NSButton!
     private var disconnectButton: NSButton!
 
@@ -24,9 +25,11 @@ final class AccountsPaneController: SettingsPaneViewController {
         table.onSelectionChange = { [weak self] _ in self?.updateButtons() }
 
         addButton = UIFactory.button("Add Account…", target: self, action: #selector(addAccount))
+        cliButton = UIFactory.button("Use GitHub CLI Login…", target: self, action: #selector(addGitHubCLIAccount))
+        cliButton.toolTip = "Use an account GitHub CLI (gh) is logged in to, e.g. for organizations without the WCleaner GitHub App."
         reconnectButton = UIFactory.button("Reconnect…", target: self, action: #selector(reconnect))
         disconnectButton = UIFactory.button("Disconnect…", target: self, action: #selector(disconnect))
-        stack.addArrangedSubview(UIFactory.hStack([addButton, reconnectButton, disconnectButton]))
+        stack.addArrangedSubview(UIFactory.hStack([addButton, cliButton, reconnectButton, disconnectButton]))
 
         addFullWidth(UIFactory.note(
             "You can connect several GitHub.com accounts at once. Signing in uses GitHub's device flow in your browser; "
@@ -34,6 +37,11 @@ final class AccountsPaneController: SettingsPaneViewController {
                 + "used only to read repository and pull request information from api.github.com. "
                 + "Disconnecting an account removes its token from this Mac and does not affect other accounts; "
                 + "you can also revoke access on GitHub under Settings › Applications."
+        ))
+        addFullWidth(UIFactory.note(
+            "Organization repositories need the WCleaner GitHub App installed in that organization. If it is not, "
+                + "“Use GitHub CLI Login…” uses an account GitHub CLI (gh) is already logged in to: WCleaner asks gh for the "
+                + "token when it checks and never stores it. Such tokens usually have the broad “repo” scope; WCleaner only reads."
         ))
         addFullWidth(UIFactory.note("Only GitHub.com is supported in this version."))
     }
@@ -44,7 +52,7 @@ final class AccountsPaneController: SettingsPaneViewController {
             configurationLabel.textColor = .secondaryLabelColor
         } else {
             configurationLabel.stringValue = "GitHub sign-in is not configured in this build: no GitHub App client ID was provided. "
-                + "Set WCLEANER_GITHUB_CLIENT_ID as described in GITHUB_APP_SETUP.md and rebuild. No account can be connected until then."
+                + "Set WCLEANER_GITHUB_CLIENT_ID as described in GITHUB_APP_SETUP.md and rebuild. Until then, only a GitHub CLI login can be used."
             configurationLabel.textColor = .systemOrange
         }
 
@@ -55,7 +63,9 @@ final class AccountsPaneController: SettingsPaneViewController {
             case .needsReconnect(let reason): status = "Needs Reconnect: \(reason)"
             }
             let token: String
-            if let expires = account.accessTokenExpiresAt {
+            if account.source == .gitHubCLI {
+                token = "From GitHub CLI"
+            } else if let expires = account.accessTokenExpiresAt {
                 token = (account.hasRefreshToken ? "Renews · " : "Expires ") + EnglishDateFormat.dateTime.format(expires)
             } else {
                 token = "Does not expire"
@@ -81,11 +91,13 @@ final class AccountsPaneController: SettingsPaneViewController {
 
     private func updateButtons() {
         addButton.isEnabled = model.gitHubClientConfigured
-        reconnectButton.isEnabled = model.gitHubClientConfigured && selectedAccount != nil
+        let selected = selectedAccount
+        reconnectButton.isEnabled = selected.map { $0.source == .gitHubCLI || model.gitHubClientConfigured } ?? false
         disconnectButton.isEnabled = selectedAccount != nil
     }
 
     @objc private func addAccount() { model.actions?.addAccount() }
+    @objc private func addGitHubCLIAccount() { model.actions?.addGitHubCLIAccount() }
 
     @objc private func reconnect() {
         guard let account = selectedAccount else { return }

@@ -214,9 +214,11 @@ public actor CleanupExecutor: CleanupExecuting {
         if let reason = await settingsBlocker(for: request.mode) {
             return await refuse(request, [reason], record: record, evidence: evidence, accountLogin: accountLogin)
         }
-        guard await enrolledRepository(matching: request.repository) != nil else {
+        guard let latest = await enrolledRepository(matching: request.repository) else {
             return await refuse(request, [.expectationChanged("The repository was removed from WCleaner during verification.")], record: record)
         }
+        // The repository's settings as they are now (a path taken off the disposable list must count).
+        input.repository = latest
         input.inspection = await inspector.inspect(record: record, commonDirectory: repository.commonDirectory, depth: .deep, now: now())
         input.tracking = decidedTracking
         let final = evaluator.evaluate(input)
@@ -231,7 +233,10 @@ public actor CleanupExecutor: CleanupExecuting {
         }
 
         // 5. Remove with Git only. No --force, no rm -rf, no git clean, no branch deletion.
-        let rationale = Self.rationale(evidence: evidence, accountLogin: accountLogin)
+        let disposable = final.reasons.compactMap { reason -> [String]? in
+            if case .disposableIgnoredFiles(let paths) = reason { paths } else { nil }
+        }.flatMap { $0 }
+        let rationale = Self.rationale(evidence: evidence, accountLogin: accountLogin, disposableIgnoredPaths: disposable)
         do {
             try await git.removeWorktree(repositoryPath: repository.path, worktreePath: record.path)
         } catch {
@@ -273,12 +278,17 @@ public actor CleanupExecutor: CleanupExecuting {
         return stored
     }
 
-    static func rationale(evidence: PullRequestEvidence, accountLogin: String?) -> [String] {
+    static func rationale(evidence: PullRequestEvidence, accountLogin: String?, disposableIgnoredPaths: [String] = []) -> [String] {
         var lines = [
             "Pull request #\(evidence.number) is merged\(evidence.mergedAt.map { " (\(EnglishDateFormat.dateTime.format($0)))" } ?? "").",
             "Worktree HEAD \(evidence.headSHA.prefix(12)) equals the pull request head.",
-            "No staged, unstaged, untracked or ignored files; no hidden index entries, per-worktree refs or nested .git folders; no submodules; no operation in progress.",
+            disposableIgnoredPaths.isEmpty
+                ? "No staged, unstaged, untracked or ignored files; no hidden index entries, per-worktree refs or nested .git folders; no checked-out submodules; no operation in progress."
+                : "No staged, unstaged or untracked files; no hidden index entries, per-worktree refs or nested .git folders; no checked-out submodules; no operation in progress.",
         ]
+        if !disposableIgnoredPaths.isEmpty {
+            lines.append("Deleted ignored files marked disposable for this repository: \(EligibilityReason.list(disposableIgnoredPaths, limit: 20)).")
+        }
         if let accountLogin {
             lines.append("Verified with GitHub account @\(accountLogin).")
         }

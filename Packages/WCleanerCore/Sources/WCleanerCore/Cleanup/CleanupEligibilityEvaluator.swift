@@ -123,7 +123,8 @@ public struct CleanupDecision: Sendable, Equatable {
         switch verdict {
         case .eligible:
             let pr = evidence.map { "PR #\($0.number) merged" } ?? "Merged"
-            return "\(pr); no local changes."
+            let disposable = reasons.contains { if case .disposableIgnoredFiles = $0 { true } else { false } }
+            return disposable ? "\(pr); no local changes except ignored files marked disposable." : "\(pr); no local changes."
         case .waiting(let until):
             return "Merged; eligible after \(EnglishDateFormat.dateTime.format(until))."
         case .needsReview, .blocked:
@@ -143,9 +144,10 @@ public struct CleanupEligibilityEvaluator: Sendable {
         var blocking: [EligibilityReason] = []
         var review: [EligibilityReason] = []
         var info: [EligibilityReason] = []
+        var disposable: [String] = []
 
         evaluateStructure(input, into: &blocking)
-        evaluateLocalState(input, into: &blocking)
+        evaluateLocalState(input, into: &blocking, disposable: &disposable)
         let evidence = evaluateHosting(input, into: &blocking)
 
         if let evidence, evidence.state == .merged, let mergedAt = evidence.mergedAt {
@@ -177,6 +179,9 @@ public struct CleanupEligibilityEvaluator: Sendable {
         let eligibleAt = confirmedAt.addingTimeInterval(input.settings.delay.timeInterval)
         let verdict: CleanupDecision.Verdict = input.now < eligibleAt ? .waiting(until: eligibleAt) : .eligible
 
+        if !disposable.isEmpty {
+            info.append(.disposableIgnoredFiles(disposable))
+        }
         if case .waiting(let until) = verdict {
             info.append(.waitingForDelay(until: until))
         }
@@ -218,7 +223,11 @@ public struct CleanupEligibilityEvaluator: Sendable {
         }
     }
 
-    private func evaluateLocalState(_ input: EligibilityInput, into blocking: inout [EligibilityReason]) {
+    private func evaluateLocalState(
+        _ input: EligibilityInput,
+        into blocking: inout [EligibilityReason],
+        disposable: inout [String]
+    ) {
         guard let inspection = input.inspection else {
             blocking.append(.statusUnavailable("The worktree has not been inspected."))
             return
@@ -242,8 +251,14 @@ public struct CleanupEligibilityEvaluator: Sendable {
         case .isDirectory: blocking.append(.notALinkedWorktree("It contains its own .git directory (an independent repository)."))
         case .mismatch(let detail): blocking.append(.notALinkedWorktree(detail))
         }
-        if inspection.hasGitmodulesFile || inspection.hasSubmoduleGitDirectories || inspection.hasGitlinks == true {
+        // A `.gitmodules` file or gitlinks alone are fine: a submodule that was never checked out is an
+        // empty folder. Submodule repositories in this worktree's Git folder, or submodule folders with any
+        // content, would be deleted.
+        if inspection.hasSubmoduleGitDirectories {
             blocking.append(.submodules)
+        }
+        if let checkedOut = inspection.checkedOutSubmodules, !checkedOut.isEmpty {
+            blocking.append(.checkedOutSubmodules(checkedOut))
         }
         if let hidden = inspection.hiddenIndexEntryCount, hidden > 0 {
             blocking.append(.hiddenIndexEntries(hidden))
@@ -255,7 +270,7 @@ public struct CleanupEligibilityEvaluator: Sendable {
             blocking.append(.nestedGitEntries(nested))
         }
         if input.requireDeepInspection {
-            if inspection.hasGitlinks == nil || inspection.hiddenIndexEntryCount == nil {
+            if inspection.hasGitlinks == nil || inspection.checkedOutSubmodules == nil || inspection.hiddenIndexEntryCount == nil {
                 blocking.append(.statusUnavailable(inspection.gitlinkCheckError ?? "The index check did not run."))
             }
             if inspection.perWorktreeRefs == nil {
@@ -274,7 +289,9 @@ public struct CleanupEligibilityEvaluator: Sendable {
             if status.unstagedCount > 0 { blocking.append(.unstagedChanges(status.unstagedCount)) }
             if status.unmergedCount > 0 { blocking.append(.unmergedChanges(status.unmergedCount)) }
             if status.untrackedCount > 0 { blocking.append(.untrackedFiles(status.untrackedCount)) }
-            if status.ignoredCount > 0 { blocking.append(.ignoredFiles(status.ignoredCount)) }
+            if status.ignoredCount > 0 {
+                evaluateIgnored(status, disposablePaths: input.repository.disposableIgnoredPaths, into: &blocking, disposable: &disposable)
+            }
             if status.submoduleChangeCount > 0 { blocking.append(.submoduleChanges(status.submoduleChangeCount)) }
         } else {
             blocking.append(.statusUnavailable(inspection.statusError ?? "Git status did not complete."))
@@ -284,6 +301,23 @@ public struct CleanupEligibilityEvaluator: Sendable {
             if head != input.record.head { blocking.append(.headChangedDuringCheck) }
         } else {
             blocking.append(.headUnavailable(inspection.headError ?? "Unknown error."))
+        }
+    }
+
+    /// Ignored files block removal unless every one of them lies in a path the user marked as disposable for
+    /// this repository. Entries Git reported beyond the list limit cannot be checked, so they block.
+    private func evaluateIgnored(
+        _ status: GitStatusSummary,
+        disposablePaths: [String],
+        into blocking: inout [EligibilityReason],
+        disposable: inout [String]
+    ) {
+        let uncovered = status.ignoredPaths.filter { !DisposablePaths.covers(disposablePaths, $0) }
+        let unlisted = max(status.ignoredCount - status.ignoredPaths.count, 0)
+        if !uncovered.isEmpty || unlisted > 0 || !status.ignoredPathsComplete {
+            blocking.append(.ignoredFiles(max(uncovered.count + unlisted, 1), paths: uncovered))
+        } else {
+            disposable = status.ignoredPaths
         }
     }
 

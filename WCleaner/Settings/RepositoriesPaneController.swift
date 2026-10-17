@@ -15,6 +15,7 @@ final class RepositoriesPaneController: SettingsPaneViewController {
     )
     private var removeButton: NSButton!
     private var accountPopup: NSPopUpButton!
+    private var disposableButton: NSButton!
     private let detailLabel = UIFactory.note("")
     private let totalsLabel = UIFactory.label("")
 
@@ -32,7 +33,9 @@ final class RepositoriesPaneController: SettingsPaneViewController {
         accountPopup = NSPopUpButton(frame: .zero, pullsDown: true)
         accountPopup.target = self
         accountPopup.setAccessibilityLabel("Choose GitHub account for the selected repository")
-        stack.addArrangedSubview(UIFactory.hStack([addButton, removeButton, accountPopup]))
+        disposableButton = UIFactory.button("Disposable Ignored Files…", target: self, action: #selector(editDisposableIgnoredPaths))
+        disposableButton.toolTip = "Ignored files and folders that may be deleted together with a worktree of this repository"
+        stack.addArrangedSubview(UIFactory.hStack([addButton, removeButton, accountPopup, disposableButton]))
         addFullWidth(detailLabel)
 
         addSection("Disk Usage")
@@ -86,11 +89,13 @@ final class RepositoriesPaneController: SettingsPaneViewController {
         guard let repository = selectedRepository else {
             removeButton.isEnabled = false
             accountPopup.isEnabled = false
+            disposableButton.isEnabled = false
             rebuildAccountMenu(title: "Choose Account", accounts: [], current: nil)
             detailLabel.stringValue = model.repositories.isEmpty ? "No repositories yet." : "Select a repository to see details."
             return
         }
         removeButton.isEnabled = true
+        disposableButton.isEnabled = true
         let snapshot = model.repositorySnapshot(repository.id)
         let connected = model.accounts.filter { $0.state.isConnected }
         accountPopup.isEnabled = !connected.isEmpty
@@ -104,6 +109,8 @@ final class RepositoriesPaneController: SettingsPaneViewController {
             lines.append("Account: \(Self.describe(resolution, model: model))")
         }
         lines.append("Enrolled: \(EnglishDateFormat.dateTime.format(repository.addedAt))")
+        lines.append("Disposable ignored files: "
+            + (repository.disposableIgnoredPaths.isEmpty ? "none (every ignored file keeps a worktree)" : repository.disposableIgnoredPaths.joined(separator: ", ")))
         if let error = snapshot?.error {
             lines.append("Problem: \(error)")
         }
@@ -153,6 +160,11 @@ final class RepositoriesPaneController: SettingsPaneViewController {
     @objc private func removeRepository() {
         guard let repository = selectedRepository else { return }
         model.actions?.removeRepository(repository.id)
+    }
+
+    @objc private func editDisposableIgnoredPaths() {
+        guard let repository = selectedRepository else { return }
+        model.actions?.editDisposableIgnoredPaths(for: repository.id)
     }
 
     @objc private func refreshSizes() { model.actions?.refreshDiskUsage() }

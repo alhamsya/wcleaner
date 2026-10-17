@@ -46,6 +46,23 @@ final class GitStatusParserTests: XCTestCase {
         XCTAssertFalse(summary.isCompletelyClean)
     }
 
+    func testListsIgnoredPathsUpToTheLimit() throws {
+        let summary = try GitStatusParser.parse(nul(["! node_modules/", "! dir with space/.env"]))
+        XCTAssertEqual(summary.ignoredPaths, ["node_modules/", "dir with space/.env"])
+        XCTAssertTrue(summary.ignoredPathsComplete)
+
+        let many = (0...GitStatusSummary.ignoredPathLimit).map { "! file\($0).log" }
+        let truncated = try GitStatusParser.parse(nul(many))
+        XCTAssertEqual(truncated.ignoredCount, GitStatusSummary.ignoredPathLimit + 1)
+        XCTAssertEqual(truncated.ignoredPaths.count, GitStatusSummary.ignoredPathLimit)
+        XCTAssertFalse(truncated.ignoredPathsComplete)
+    }
+
+    func testIgnoredEntryWithoutPathFailsClosed() {
+        XCTAssertThrowsError(try GitStatusParser.parse(nul(["!"])))
+        XCTAssertThrowsError(try GitStatusParser.parse(nul(["! "])))
+    }
+
     func testIgnoredOnlyIsNotClean() throws {
         let summary = try GitStatusParser.parse(nul(["! .env"]))
         XCTAssertFalse(summary.isCompletelyClean)

@@ -1,6 +1,6 @@
 import Foundation
 
-/// Summary of `git status --porcelain=v2 -z --branch --untracked-files=normal --ignored=traditional`.
+/// Summary of `git status --porcelain=v2 -z --branch --untracked-files=normal --ignored=matching`.
 public struct GitStatusSummary: Sendable, Equatable, Codable {
     public var branchHead: String?
     public var commit: String?
@@ -12,7 +12,14 @@ public struct GitStatusSummary: Sendable, Equatable, Codable {
     public var unmergedCount: Int
     public var untrackedCount: Int
     public var ignoredCount: Int
+    /// The ignored entries, relative to the worktree root, as the ignore rules matched them (an ignored folder
+    /// ends in `/` and stands for everything inside it).
+    /// At most `ignoredPathLimit` of them; `ignoredPathsComplete` is false when Git reported more.
+    public var ignoredPaths: [String]
+    public var ignoredPathsComplete: Bool
     public var submoduleChangeCount: Int
+
+    public static let ignoredPathLimit = 500
 
     public init(
         branchHead: String? = nil,
@@ -25,6 +32,8 @@ public struct GitStatusSummary: Sendable, Equatable, Codable {
         unmergedCount: Int = 0,
         untrackedCount: Int = 0,
         ignoredCount: Int = 0,
+        ignoredPaths: [String] = [],
+        ignoredPathsComplete: Bool = true,
         submoduleChangeCount: Int = 0
     ) {
         self.branchHead = branchHead
@@ -37,6 +46,8 @@ public struct GitStatusSummary: Sendable, Equatable, Codable {
         self.unmergedCount = unmergedCount
         self.untrackedCount = untrackedCount
         self.ignoredCount = ignoredCount
+        self.ignoredPaths = ignoredPaths
+        self.ignoredPathsComplete = ignoredPathsComplete
         self.submoduleChangeCount = submoduleChangeCount
     }
 
@@ -84,6 +95,13 @@ public enum GitStatusParser {
                 summary.untrackedCount += 1
             case "!":
                 summary.ignoredCount += 1
+                let path = String(line.dropFirst(2))
+                guard line.hasPrefix("! "), !path.isEmpty else { throw ParseError.truncatedEntry }
+                if summary.ignoredPaths.count < GitStatusSummary.ignoredPathLimit {
+                    summary.ignoredPaths.append(path)
+                } else {
+                    summary.ignoredPathsComplete = false
+                }
             default:
                 throw ParseError.unknownEntry(String(kind))
             }

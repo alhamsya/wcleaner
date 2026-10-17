@@ -25,7 +25,8 @@ struct EligibilityFixture {
         worktreeGitDirectory: "/Users/me/code/repo/.git/worktrees/feature",
         status: GitStatusSummary(branchHead: "feature"),
         headSHA: head,
-        hasGitlinks: false
+        hasGitlinks: false,
+        checkedOutSubmodules: []
     )
     var inspectionPresent = true
     var githubRepository: ResolvedGitHubRepository? = ResolvedGitHubRepository(id: 1001, owner: "octo", name: "repo", htmlURL: "https://github.com/octo/repo")
@@ -153,15 +154,28 @@ final class CleanupEligibilityEvaluatorTests: XCTestCase {
         assertBlocked(mismatch, containing: .notALinkedWorktree("elsewhere"))
     }
 
-    func testSubmodulesBlock() {
-        var gitmodules = EligibilityFixture(); gitmodules.inspection.hasGitmodulesFile = true
-        assertBlocked(gitmodules, containing: .submodules)
-
+    func testSubmoduleRepositoriesAndCheckedOutSubmodulesBlock() {
         var modulesDirectory = EligibilityFixture(); modulesDirectory.inspection.hasSubmoduleGitDirectories = true
         assertBlocked(modulesDirectory, containing: .submodules)
 
-        var gitlinks = EligibilityFixture(); gitlinks.inspection.hasGitlinks = true
-        assertBlocked(gitlinks, containing: .submodules)
+        var checkedOut = EligibilityFixture()
+        checkedOut.inspection.hasGitmodulesFile = true
+        checkedOut.inspection.hasGitlinks = true
+        checkedOut.inspection.checkedOutSubmodules = ["vendor/lib"]
+        assertBlocked(checkedOut, containing: .checkedOutSubmodules(["vendor/lib"]))
+    }
+
+    /// A submodule that was never checked out is an empty folder: removing the worktree loses nothing.
+    func testSubmodulesThatWereNeverCheckedOutDoNotBlock() {
+        var fixture = EligibilityFixture()
+        fixture.requireDeep = true
+        fixture.inspection.hasGitmodulesFile = true
+        fixture.inspection.hasGitlinks = true
+        fixture.inspection.checkedOutSubmodules = []
+        fixture.inspection.hiddenIndexEntryCount = 0
+        fixture.inspection.perWorktreeRefs = []
+        fixture.inspection.nestedGitEntries = []
+        XCTAssertEqual(fixture.decide().verdict, .eligible)
     }
 
     func testDeepInspectionRequiredBeforeRemoval() {
@@ -198,6 +212,8 @@ final class CleanupEligibilityEvaluatorTests: XCTestCase {
         XCTAssertEqual(noRefs.decide().verdict, .blocked)
         var noGitlinks = complete; noGitlinks.inspection.hasGitlinks = nil
         XCTAssertEqual(noGitlinks.decide().verdict, .blocked)
+        var noSubmoduleCheck = complete; noSubmoduleCheck.inspection.checkedOutSubmodules = nil
+        XCTAssertEqual(noSubmoduleCheck.decide().verdict, .blocked)
         var noNestedScan = complete; noNestedScan.inspection.nestedGitEntries = nil
         XCTAssertEqual(noNestedScan.decide().verdict, .blocked)
     }
@@ -218,6 +234,48 @@ final class CleanupEligibilityEvaluatorTests: XCTestCase {
             fixture.inspection.status?[keyPath: keyPath] = 1
             assertBlocked(fixture, containing: reason)
         }
+    }
+
+    // MARK: Disposable ignored files
+
+    func testIgnoredFilesBlockUnlessEveryOneIsMarkedDisposable() {
+        var fixture = EligibilityFixture()
+        fixture.inspection.status?.ignoredCount = 2
+        fixture.inspection.status?.ignoredPaths = [".code-review-graph/", ".env"]
+        assertBlocked(fixture, containing: .ignoredFiles(2, paths: [".code-review-graph/", ".env"]))
+
+        fixture.repository.disposableIgnoredPaths = [".code-review-graph"]
+        assertBlocked(fixture, containing: .ignoredFiles(1, paths: [".env"]))
+
+        fixture.repository.disposableIgnoredPaths = [".code-review-graph", ".env"]
+        let decision = fixture.decide()
+        XCTAssertEqual(decision.verdict, .eligible)
+        XCTAssertTrue(decision.automaticCleanupAllowed)
+        XCTAssertEqual(decision.reasons, [.disposableIgnoredFiles([".code-review-graph/", ".env"])])
+        XCTAssertEqual(decision.summary, "PR #12 merged; no local changes except ignored files marked disposable.")
+    }
+
+    func testDisposablePathCoversOnlyItselfAndItsContents() {
+        var fixture = EligibilityFixture()
+        fixture.repository.disposableIgnoredPaths = ["build"]
+        fixture.inspection.status?.ignoredCount = 3
+        fixture.inspection.status?.ignoredPaths = ["build/", "app/build/", "build.log"]
+        assertBlocked(fixture, containing: .ignoredFiles(2, paths: ["app/build/", "build.log"]))
+    }
+
+    /// Entries Git reported beyond the list limit, or a count without paths, cannot be checked.
+    func testIgnoredFilesThatWereNotListedBlock() {
+        var truncated = EligibilityFixture()
+        truncated.repository.disposableIgnoredPaths = ["node_modules"]
+        truncated.inspection.status?.ignoredCount = 3
+        truncated.inspection.status?.ignoredPaths = ["node_modules/"]
+        truncated.inspection.status?.ignoredPathsComplete = false
+        assertBlocked(truncated, containing: .ignoredFiles(2, paths: []))
+
+        var countOnly = EligibilityFixture()
+        countOnly.repository.disposableIgnoredPaths = ["node_modules"]
+        countOnly.inspection.status?.ignoredCount = 1
+        assertBlocked(countOnly, containing: .ignoredFiles(1))
     }
 
     func testUnknownStatusFailsClosed() {
@@ -451,6 +509,12 @@ final class CleanupEligibilityEvaluatorTests: XCTestCase {
             XCTAssertFalse(reason.message.isEmpty)
         }
         XCTAssertEqual(EligibilityReason.ignoredFiles(2).kind, .blocking)
+        XCTAssertEqual(EligibilityReason.checkedOutSubmodules(["a"]).kind, .blocking)
+        XCTAssertEqual(EligibilityReason.disposableIgnoredFiles(["a"]).kind, .info)
+        XCTAssertEqual(
+            EligibilityReason.ignoredFiles(7, paths: ["a", "b", "c", "d", "e", "f"]).message,
+            "7 ignored files or folders would be lost: a, b, c, d, e and 2 more."
+        )
         XCTAssertEqual(EligibilityReason.mergedBeforeEnrollment(Date()).kind, .review)
         XCTAssertEqual(EligibilityReason.automaticCleanupOff.kind, .info)
     }

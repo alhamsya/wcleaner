@@ -25,6 +25,10 @@ public struct LocalWorktreeInspection: Sendable, Equatable, Codable {
     public var hasSubmoduleGitDirectories: Bool
     /// Only checked during deep inspection (immediately before removal); nil means "not checked".
     public var hasGitlinks: Bool?
+    /// Submodule (gitlink) folders that hold anything: files, a `.git` entry, a symbolic link, or content
+    /// that could not be read. A submodule that was never checked out is an empty folder (or none) and is
+    /// not listed. Nil until a deep check ran.
+    public var checkedOutSubmodules: [String]?
     public var gitlinkCheckError: String?
     /// Index entries whose changes `git status` cannot show (skip-worktree, assume-unchanged). Nil until a deep check ran.
     public var hiddenIndexEntryCount: Int?
@@ -52,6 +56,7 @@ public struct LocalWorktreeInspection: Sendable, Equatable, Codable {
         hasGitmodulesFile: Bool = false,
         hasSubmoduleGitDirectories: Bool = false,
         hasGitlinks: Bool? = nil,
+        checkedOutSubmodules: [String]? = nil,
         gitlinkCheckError: String? = nil,
         hiddenIndexEntryCount: Int? = nil,
         perWorktreeRefs: [String]? = nil,
@@ -74,6 +79,7 @@ public struct LocalWorktreeInspection: Sendable, Equatable, Codable {
         self.hasGitmodulesFile = hasGitmodulesFile
         self.hasSubmoduleGitDirectories = hasSubmoduleGitDirectories
         self.hasGitlinks = hasGitlinks
+        self.checkedOutSubmodules = checkedOutSubmodules
         self.gitlinkCheckError = gitlinkCheckError
         self.hiddenIndexEntryCount = hiddenIndexEntryCount
         self.perWorktreeRefs = perWorktreeRefs
@@ -86,7 +92,8 @@ public struct LocalWorktreeInspection: Sendable, Equatable, Codable {
 
     /// True when every deep check ran to completion.
     public var hasDeepResults: Bool {
-        hasGitlinks != nil && hiddenIndexEntryCount != nil && perWorktreeRefs != nil && nestedGitEntries != nil
+        hasGitlinks != nil && checkedOutSubmodules != nil && hiddenIndexEntryCount != nil
+            && perWorktreeRefs != nil && nestedGitEntries != nil
     }
 }
 
@@ -178,6 +185,9 @@ public struct WorktreeInspector: Sendable {
             do {
                 let scan = try await git.indexScan(worktreePath: path)
                 inspection.hasGitlinks = scan.hasGitlinks
+                inspection.checkedOutSubmodules = scan.gitlinkPaths.filter {
+                    Self.isCheckedOut(submodulePath: $0, worktreePath: path)
+                }
                 inspection.hiddenIndexEntryCount = scan.hiddenEntryCount
             } catch {
                 inspection.gitlinkCheckError = String(describing: error)
@@ -194,6 +204,42 @@ public struct WorktreeInspector: Sendable {
             }
         }
         return inspection
+    }
+
+    /// Whether a submodule folder holds anything that `git worktree remove` would delete. Never follows
+    /// symbolic links. Fails closed: a symbolic link anywhere on the path, a file in place of the folder,
+    /// any folder content, or anything that cannot be read counts as checked out. Only a missing path or an
+    /// empty folder (how Git leaves a submodule that was never initialized) does not.
+    static func isCheckedOut(submodulePath: String, worktreePath: String) -> Bool {
+        let fileManager = FileManager.default
+        let components = submodulePath.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        guard !components.isEmpty, components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }) else {
+            return true
+        }
+        var current = worktreePath
+        for (offset, component) in components.enumerated() {
+            current += "/" + component
+            let attributes: [FileAttributeKey: Any]
+            do {
+                attributes = try fileManager.attributesOfItem(atPath: current)
+            } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
+                return false
+            } catch {
+                return true
+            }
+            let type = attributes[.type] as? FileAttributeType
+            let isLast = offset == components.count - 1
+            guard type == .typeDirectory else {
+                // A symbolic link or file where a folder should be. A missing parent means the
+                // submodule folder is missing too (handled above).
+                return true
+            }
+            if isLast {
+                guard let contents = try? fileManager.contentsOfDirectory(atPath: current) else { return true }
+                return !contents.isEmpty
+            }
+        }
+        return true
     }
 
     /// Confirms `<worktree>/.git` is a `gitdir:` file that points into `<common-dir>/worktrees/`

@@ -15,15 +15,16 @@ WCleaner deletes folders, so the main risk is **removing work that was not safe 
   - checks that the repository is still enrolled with the same record;
   - lists worktrees again;
   - deep-inspects the worktree:
-    - status, including **ignored** files;
+    - status, including **ignored** files. Each ignored file must lie in a path you marked as disposable for that repository (see below), or the worktree is kept;
     - files flagged *skip-worktree* or *assume-unchanged*, whose changes `git status` hides;
     - refs that exist only in this worktree (`refs/worktree`, `refs/bisect`, `refs/rewritten`);
     - files or folders named `.git` (in any letter case) below the top level. `git status` never shows them, and `git worktree remove` deletes them;
-    - submodules and gitlinks;
+    - submodules: submodule repositories in the worktree's own Git folder (`modules/`) block removal, and so does any submodule folder that holds anything (files, a `.git` entry, a symbolic link, or content that cannot be read). A submodule that was never checked out is an empty folder and does not block. `.gitmodules` alone does not block;
     - in-progress operations;
     - the `.git` file back-pointer and symlinks;
   - verifies the existing account assignment without discovering or assigning a new one;
   - fetches the pull request again, bypassing ETags.
+- **Disposable ignored files** are opt-in per repository, set in Settings › Repositories or from a worktree's menu (*Allow Deleting These Ignored Files…*, which lists the exact paths Git reported). Entries are exact paths relative to the worktree's top folder, with no wildcards, `..` or `.git`. An entry covers that file or folder and everything inside it, nothing else. Ignored files are listed with `git status --ignored=matching`, which reports exactly what an ignore rule matched rather than a parent folder that happens to hold only ignored files. If Git reports more than 500 ignored entries, the ones beyond the list count as not disposable. The final check before removal reads the repository's list as it is at that moment.
 - It reads the settings again at each step. If you pause or turn off automatic cleanup, or withdraw consent, a removal that is already under way stops.
 - Right before `git worktree remove`, every local check runs once more. Git's own check covers none of the deep checks above, and it ignores ignored files.
 - The dry run in the menu runs the same deep checks for every worktree that looks removable. A worktree shown as *Safe to remove* is therefore not refused for a reason the menu did not show.
@@ -39,13 +40,14 @@ WCleaner deletes folders, so the main risk is **removing work that was not safe 
 
 - GitHub tokens are stored only in the macOS Keychain, one item per account and token type, `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`, not synchronizable. They are never written to settings, logs, history or notifications; token types print as `<redacted>`.
 - No client secret or private key exists in the app. Sign-in uses the public-client device flow.
+- Optional *GitHub CLI login*: for such an account WCleaner stores no token at all. When it needs one it runs `gh auth token --hostname github.com --user <login>` (discrete arguments, allow-listed environment without `GH_TOKEN`, `GITHUB_TOKEN`, `GH_HOST` or `GH_CONFIG_DIR`, 10 s timeout), keeps the token in memory for at most 5 minutes, and checks every freshly read token with `GET /user`: a token for a different user ID, a missing `gh` or a logged-out `gh` marks the account *Needs Reconnect*. Disconnecting never logs `gh` out. Trade-off: GitHub CLI tokens usually carry the broad `repo` scope (read and write); WCleaner only sends `GET` requests, but anyone who can run code as you can already read that token from `gh`.
 - Each account is identified by host and numeric user ID. Reconnecting with a different user is rejected. A repository never falls back to another account silently.
 - Network: only `github.com` and `api.github.com` over HTTPS (TLS 1.2+), using an ephemeral `URLSession` with no cookies or disk cache. Redirects are followed only to the same host over HTTPS, so the `Authorization` header never reaches another host. URL path segments are strictly validated and percent-encoded.
 - `401` marks the account *Needs Reconnect*; `403`, `404`, `422`, rate limits and network errors block cleanup for that scan.
 
 ### Local processes
 
-- Git and `du` run through `Process` with discrete arguments (no shell), a minimal environment (`GIT_TERMINAL_PROMPT=0`, `GIT_OPTIONAL_LOCKS=0`, fixed `PATH`, no pager, `core.fsmonitor=false` for status), timeouts and output limits. SSH host aliases are resolved by reading `~/.ssh/config`, never by running `ssh`.
+- Git, `du` and (for GitHub CLI accounts) `gh auth status` / `gh auth token` run through `Process` with discrete arguments (no shell), a minimal environment (`GIT_TERMINAL_PROMPT=0`, `GIT_OPTIONAL_LOCKS=0`, fixed `PATH`, no pager, `core.fsmonitor=false` for status), timeouts and output limits. SSH host aliases are resolved by reading `~/.ssh/config`, never by running `ssh`.
 - `du` uses `-x -P`: one filesystem, no symlink following. Sizes are estimates.
 - Remote URLs are shown with embedded credentials redacted.
 
@@ -62,7 +64,7 @@ Mole is a separate GPL-3.0 tool that the user installs. WCleaner only detects it
 - The app is not sandboxed: it must run Git and `du` on folders you choose. It is hardened-runtime signed in Release builds.
 - A worktree could still change in the moment between the final status check and Git's removal. Git's own refusal to remove dirty worktrees without `--force` is the last line of defense, but it does not cover ignored files created in that moment.
 - Commits that exist **only in the worktree's HEAD reflog** (for example, a commit you amended or reset away) are not checked and are lost with the worktree's administrative folder. Blocking on them would block every amend or rebase workflow. Commits on branches are never affected, because the branch is kept.
-- Ignored files are detected with `git status --ignored` (with fsmonitor and the untracked cache turned off). Folders named `.git` are found by WCleaner's own folder scan. That scan does not follow symbolic links, and it fails closed above 2 million entries or 60 seconds.
+- Ignored files are detected with `git status --ignored=matching` (with fsmonitor and the untracked cache turned off). Ignored files inside a path you marked as disposable are deleted with the worktree and cannot be recovered, including files that appear there later. Folders named `.git` are found by WCleaner's own folder scan. That scan does not follow symbolic links, and it fails closed above 2 million entries or 60 seconds.
 - Sparse checkouts are always kept, because their skip-worktree entries cannot be checked.
 - The review requirement for pre-enrollment merges allows for 15 minutes of clock difference between this Mac and GitHub. If the Mac's clock was further behind when you enrolled a repository, an older merge might not be flagged for review. Every other check still applies.
 - Tested only with GitHub.com; GitHub Enterprise and GitLab are not supported.

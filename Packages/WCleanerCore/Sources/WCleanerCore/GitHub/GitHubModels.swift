@@ -25,7 +25,15 @@ public enum AccountConnectionState: Codable, Sendable, Hashable {
     public var isConnected: Bool { self == .connected }
 }
 
-/// Non-secret account metadata. Tokens live only in the Keychain.
+/// Where an account's token comes from.
+public enum AccountCredentialSource: String, Codable, Sendable, Hashable {
+    /// Signed in with WCleaner's device flow; tokens are in WCleaner's own Keychain items.
+    case deviceFlow
+    /// Borrowed from GitHub CLI (`gh auth token`) whenever needed; WCleaner stores no token.
+    case gitHubCLI
+}
+
+/// Non-secret account metadata. Tokens live only in the Keychain (WCleaner's own, or GitHub CLI's).
 public struct GitHubAccount: Codable, Sendable, Identifiable, Hashable {
     public var id: AccountID
     public var login: String
@@ -36,6 +44,7 @@ public struct GitHubAccount: Codable, Sendable, Identifiable, Hashable {
     public var refreshTokenExpiresAt: Date?
     public var hasRefreshToken: Bool
     public var state: AccountConnectionState
+    public var source: AccountCredentialSource
 
     public init(
         id: AccountID,
@@ -46,7 +55,8 @@ public struct GitHubAccount: Codable, Sendable, Identifiable, Hashable {
         accessTokenExpiresAt: Date? = nil,
         refreshTokenExpiresAt: Date? = nil,
         hasRefreshToken: Bool = false,
-        state: AccountConnectionState = .connected
+        state: AccountConnectionState = .connected,
+        source: AccountCredentialSource = .deviceFlow
     ) {
         self.id = id
         self.login = login
@@ -57,6 +67,26 @@ public struct GitHubAccount: Codable, Sendable, Identifiable, Hashable {
         self.refreshTokenExpiresAt = refreshTokenExpiresAt
         self.hasRefreshToken = hasRefreshToken
         self.state = state
+        self.source = source
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, login, name, addedAt, lastVerifiedAt, accessTokenExpiresAt, refreshTokenExpiresAt, hasRefreshToken, state, source
+    }
+
+    /// Accounts saved before `source` existed were all device-flow accounts.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(AccountID.self, forKey: .id)
+        login = try container.decode(String.self, forKey: .login)
+        name = try container.decodeIfPresent(String.self, forKey: .name)
+        addedAt = try container.decode(Date.self, forKey: .addedAt)
+        lastVerifiedAt = try container.decode(Date.self, forKey: .lastVerifiedAt)
+        accessTokenExpiresAt = try container.decodeIfPresent(Date.self, forKey: .accessTokenExpiresAt)
+        refreshTokenExpiresAt = try container.decodeIfPresent(Date.self, forKey: .refreshTokenExpiresAt)
+        hasRefreshToken = try container.decodeIfPresent(Bool.self, forKey: .hasRefreshToken) ?? false
+        state = try container.decode(AccountConnectionState.self, forKey: .state)
+        source = try container.decodeIfPresent(AccountCredentialSource.self, forKey: .source) ?? .deviceFlow
     }
 
     public var displayName: String {
@@ -192,6 +222,17 @@ public enum PullRequestMatch: Sendable, Equatable {
         switch self {
         case .matched(let evidence), .headMismatch(let evidence, _): evidence
         default: nil
+        }
+    }
+
+    /// Short label for lists, e.g. "PR #12 Merged".
+    public var summary: String {
+        switch self {
+        case .matched(let evidence): "PR #\(evidence.number) \(evidence.state.title)"
+        case .headMismatch(let evidence, _): "PR #\(evidence.number) \(evidence.state.title), different HEAD"
+        case .ambiguous(let numbers): "\(numbers.count) possible PRs"
+        case .notFound: "No PR"
+        case .unavailable: "PR status unavailable"
         }
     }
 }
