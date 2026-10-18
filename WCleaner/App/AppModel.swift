@@ -66,6 +66,8 @@ protocol AppActions: AnyObject {
     func revokeCleanupConsent()
     func reviewWorktree(_ worktree: WorktreeSnapshot)
     func removeWorktreeManually(_ worktree: WorktreeSnapshot)
+    func removeWorktreeWithoutMergedPullRequest(_ worktree: WorktreeSnapshot)
+    func stashChangesAndRemoveWorktree(_ worktree: WorktreeSnapshot)
     func openPullRequest(_ worktree: WorktreeSnapshot)
 
     func setLaunchAtLogin(_ enabled: Bool)

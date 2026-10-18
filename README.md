@@ -31,6 +31,10 @@ A linked worktree is removed only when **all** of these hold, re-checked immedia
 5. The merge happened after enrollment and consent, or you reviewed that exact pull request and commit.
 6. Consent is still given and, for automatic cleanup, cleanup is still on and not paused. These settings are read again right before removal.
 
+**Remove Worktree Anyway** (manual only): a worktree whose pull request is open, closed, missing or cannot be verified can still be removed from its menu, as long as rules 1, 2 and 6 hold (nothing local would be lost) and you confirm. Git keeps the branch and all its commits, including commits that were never pushed. Automatic cleanup never does this; it still needs a verified merge.
+
+**Save Changes and Remove Worktree** (manual only): when uncommitted changes are the only thing keeping a worktree (staged, unstaged or untracked files), WCleaner can save them in a Git stash first (`git stash push --include-untracked`), confirm that the stash holds them, and only then remove the worktree. The stash lives in the repository, so you can restore the changes later in any worktree with `git stash apply <stash>`; WCleaner shows the exact command and keeps it in History. Ignored files (unless marked disposable), merge conflicts, submodule changes and skip-worktree files still keep a worktree.
+
 Removal is `git worktree remove -- <path>`, **without `--force`**. If Git refuses, WCleaner stops and records why. It never uses `rm -rf`, `git clean`, branch deletion or force-prune. Cleanups are serialized per repository. Development (Debug) builds never remove anything unless `WCLEANER_ALLOW_REMOVAL_IN_DEBUG=1` is set. See [SECURITY.md](SECURITY.md).
 
 ## Build from source

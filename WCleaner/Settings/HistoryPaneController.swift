@@ -46,7 +46,12 @@ final class HistoryPaneController: SettingsPaneViewController {
     override func shouldRefresh(for change: AppModel.Change) -> Bool { change == .history }
 
     static func resultTitle(_ entry: CleanupHistoryEntry) -> String {
-        let mode = entry.mode == .automatic ? "Auto" : "Manual"
+        let mode = switch entry.mode {
+        case .automatic: "Auto"
+        case .manual: "Manual"
+        case .manualUnmerged: "Manual, PR not merged"
+        case .manualStashed: "Manual, changes stashed"
+        }
         switch entry.result {
         case .removed: return "\(mode): Removed"
         case .refused: return "\(mode): Stopped"
@@ -68,6 +73,7 @@ final class HistoryPaneController: SettingsPaneViewController {
         if let url = entry.pullRequestURL { lines.append("Pull request: \(url)") }
         if let login = entry.accountLogin { lines.append("Account: @\(login)") }
         if let size = entry.estimatedSizeBytes { lines.append("Estimated size: \(ByteFormatter.string(size))") }
+        if let stash = entry.stashCommit { lines.append("Saved changes: Git stash \(stash) (restore with “git stash apply \(stash)”)") }
         lines += entry.rationale.map { "• \($0)" }
         if let error = entry.errorMessage { lines.append("Error: \(error)") }
         detailLabel.stringValue = lines.joined(separator: "\n")

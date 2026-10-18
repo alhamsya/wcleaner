@@ -15,6 +15,8 @@ import WCleanerCore
     func reviewWorktree(_ sender: NSMenuItem)
     func removeWorktree(_ sender: NSMenuItem)
     func allowDisposableIgnoredFiles(_ sender: NSMenuItem)
+    func removeWorktreeWithoutMergedPullRequest(_ sender: NSMenuItem)
+    func stashChangesAndRemoveWorktree(_ sender: NSMenuItem)
     func openRepositorySettings(_ sender: Any?)
     func quit(_ sender: Any?)
 }
@@ -203,9 +205,30 @@ struct StatusMenuBuilder {
             let remove = actionItem("Remove Worktree Now…", #selector(StatusMenuTarget.removeWorktree(_:)))
             remove.representedObject = worktree
             submenu.addItem(remove)
+        } else if Self.canRemoveWithoutMergedPullRequest(worktree) {
+            let remove = actionItem("Remove Worktree Anyway…", #selector(StatusMenuTarget.removeWorktreeWithoutMergedPullRequest(_:)))
+            remove.representedObject = worktree
+            remove.toolTip = "Nothing local would be lost; only the merged pull request is missing. The branch is kept."
+            submenu.addItem(remove)
+        } else if Self.canStashAndRemove(worktree) {
+            let remove = actionItem("Save Changes and Remove Worktree…", #selector(StatusMenuTarget.stashChangesAndRemoveWorktree(_:)))
+            remove.representedObject = worktree
+            remove.toolTip = "Saves the uncommitted changes in a Git stash first, then removes the worktree. The branch is kept."
+            submenu.addItem(remove)
         }
         item.submenu = submenu
         return item
+    }
+
+    /// A linked worktree that passed every local check but has no merged pull request (open, closed, none,
+    /// or not verifiable): it may be removed manually, keeping its branch.
+    static func canRemoveWithoutMergedPullRequest(_ worktree: WorktreeSnapshot) -> Bool {
+        !worktree.isPrimary && !worktree.decision.isSafeToRemove && worktree.decision.localChecksPassed
+    }
+
+    /// A linked worktree whose only local reasons are uncommitted changes that a Git stash can save completely.
+    static func canStashAndRemove(_ worktree: WorktreeSnapshot) -> Bool {
+        !worktree.isPrimary && worktree.decision.changesCanBeStashed
     }
 
     /// True when the decision lists every ignored file that keeps the worktree, so they can be offered as disposable.

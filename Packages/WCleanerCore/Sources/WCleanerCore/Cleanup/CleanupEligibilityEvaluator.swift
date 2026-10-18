@@ -92,12 +92,33 @@ public struct CleanupDecision: Sendable, Equatable {
     public var evidence: PullRequestEvidence?
     /// True only when automatic cleanup may remove this worktree now.
     public var automaticCleanupAllowed: Bool
+    /// The structural and local reasons alone (primary, locked, detached, local files, submodules…), without
+    /// the pull request, account and policy ones. Nil when unknown, which never counts as passed.
+    public var localBlockingReasons: [EligibilityReason]?
 
-    public init(verdict: Verdict, reasons: [EligibilityReason], evidence: PullRequestEvidence?, automaticCleanupAllowed: Bool) {
+    public init(
+        verdict: Verdict,
+        reasons: [EligibilityReason],
+        evidence: PullRequestEvidence?,
+        automaticCleanupAllowed: Bool,
+        localBlockingReasons: [EligibilityReason]? = nil
+    ) {
         self.verdict = verdict
         self.reasons = reasons
         self.evidence = evidence
         self.automaticCleanupAllowed = automaticCleanupAllowed
+        self.localBlockingReasons = localBlockingReasons
+    }
+
+    /// True when removing the worktree would lose nothing local, whatever its pull request says. This is
+    /// what removal without a merged pull request requires (Git keeps the branch and its commits).
+    public var localChecksPassed: Bool { localBlockingReasons?.isEmpty == true }
+
+    /// True when the only local reasons are uncommitted changes that a stash can save completely, so the
+    /// worktree may be removed after saving them (`git stash push --include-untracked`).
+    public var changesCanBeStashed: Bool {
+        guard let local = localBlockingReasons, !local.isEmpty else { return false }
+        return local.allSatisfy(\.isStashable)
     }
 
     /// True when the local and remote safety checks passed (the user may remove it manually).
@@ -148,6 +169,7 @@ public struct CleanupEligibilityEvaluator: Sendable {
 
         evaluateStructure(input, into: &blocking)
         evaluateLocalState(input, into: &blocking, disposable: &disposable)
+        let local = blocking
         let evidence = evaluateHosting(input, into: &blocking)
 
         if let evidence, evidence.state == .merged, let mergedAt = evidence.mergedAt {
@@ -160,14 +182,14 @@ public struct CleanupEligibilityEvaluator: Sendable {
         }
 
         if !blocking.isEmpty {
-            return CleanupDecision(verdict: .blocked, reasons: blocking + review, evidence: evidence, automaticCleanupAllowed: false)
+            return CleanupDecision(verdict: .blocked, reasons: blocking + review, evidence: evidence, automaticCleanupAllowed: false, localBlockingReasons: local)
         }
         if !review.isEmpty {
-            return CleanupDecision(verdict: .needsReview, reasons: review, evidence: evidence, automaticCleanupAllowed: false)
+            return CleanupDecision(verdict: .needsReview, reasons: review, evidence: evidence, automaticCleanupAllowed: false, localBlockingReasons: local)
         }
         guard let evidence else {
             // Unreachable when no blocking reasons exist, but never default to eligible.
-            return CleanupDecision(verdict: .blocked, reasons: [.noPullRequest], evidence: nil, automaticCleanupAllowed: false)
+            return CleanupDecision(verdict: .blocked, reasons: [.noPullRequest], evidence: nil, automaticCleanupAllowed: false, localBlockingReasons: local)
         }
 
         let confirmedAt: Date
@@ -197,7 +219,7 @@ public struct CleanupEligibilityEvaluator: Sendable {
             && input.settings.cleanupConsentAt != nil
             && input.settings.autoCleanupEnabled
             && !input.settings.autoCleanupPaused
-        return CleanupDecision(verdict: verdict, reasons: info, evidence: evidence, automaticCleanupAllowed: automatic)
+        return CleanupDecision(verdict: verdict, reasons: info, evidence: evidence, automaticCleanupAllowed: automatic, localBlockingReasons: local)
     }
 
     private func evaluateStructure(_ input: EligibilityInput, into blocking: inout [EligibilityReason]) {

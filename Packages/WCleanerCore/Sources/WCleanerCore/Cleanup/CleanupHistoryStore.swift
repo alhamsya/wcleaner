@@ -3,6 +3,11 @@ import Foundation
 public enum CleanupMode: String, Codable, Sendable {
     case automatic
     case manual
+    /// Manual removal the user asked for although the pull request is not merged. Every local check
+    /// still applies; the branch and its commits are kept.
+    case manualUnmerged
+    /// Like `manualUnmerged`, after saving the worktree's uncommitted changes in a Git stash.
+    case manualStashed
 }
 
 public enum CleanupResult: String, Codable, Sendable {
@@ -36,6 +41,8 @@ public struct CleanupHistoryEntry: Codable, Sendable, Identifiable, Equatable {
     public var rationale: [String]
     public var errorMessage: String?
     public var estimatedSizeBytes: Int64?
+    /// The stash commit holding the worktree's uncommitted changes, when WCleaner saved them first.
+    public var stashCommit: String?
 
     public init(
         id: UUID = UUID(),
@@ -54,7 +61,8 @@ public struct CleanupHistoryEntry: Codable, Sendable, Identifiable, Equatable {
         accountID: String?,
         rationale: [String],
         errorMessage: String?,
-        estimatedSizeBytes: Int64?
+        estimatedSizeBytes: Int64?,
+        stashCommit: String? = nil
     ) {
         self.id = id
         self.timestamp = timestamp
@@ -73,6 +81,7 @@ public struct CleanupHistoryEntry: Codable, Sendable, Identifiable, Equatable {
         self.rationale = rationale
         self.errorMessage = errorMessage
         self.estimatedSizeBytes = estimatedSizeBytes
+        self.stashCommit = stashCommit
     }
 }
 

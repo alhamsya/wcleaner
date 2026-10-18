@@ -376,10 +376,52 @@ public struct GitClient: Sendable {
         return value.isEmpty ? nil : value
     }
 
+    /// The newest stash commit (`refs/stash` is shared by every worktree of a repository), or nil when the
+    /// repository has none.
+    public func latestStash(worktreePath: String) async throws -> StashCommit? {
+        let lookup = try await run(["rev-parse", "--verify", "--quiet", "refs/stash"], in: worktreePath, timeout: .seconds(15), allowFailure: true)
+        guard lookup.succeeded else {
+            // Exit 1 without output means "no stash"; anything else is an error.
+            if lookup.exitCode == 1 && lookup.stdoutString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return nil }
+            throw GitError.commandFailed(command: "rev-parse", exitCode: lookup.exitCode, stderr: String(lookup.stderrString.prefix(500)))
+        }
+        let sha = lookup.stdoutString.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard GitObjectID.isValid(sha) else { throw GitError.malformedOutput("rev-parse refs/stash") }
+        let show = try await run(["show", "-s", "--format=%H%x00%P%x00%s", sha, "--"], in: worktreePath, timeout: .seconds(15))
+        let fields = show.stdoutString.trimmingCharacters(in: .newlines).components(separatedBy: "\u{0}")
+        guard fields.count == 3, fields[0] == sha else { throw GitError.malformedOutput("show refs/stash") }
+        let parents = fields[1].split(separator: " ").map(String.init)
+        guard parents.allSatisfy(GitObjectID.isValid) else { throw GitError.malformedOutput("show refs/stash") }
+        return StashCommit(sha: sha, parents: parents, subject: fields[2])
+    }
+
+    /// Saves the worktree's staged, unstaged and untracked changes in a new stash and resets the worktree to
+    /// HEAD (`git stash push --include-untracked --message <message>`). Ignored files are neither saved nor
+    /// touched. Hooks, fsmonitor and the untracked cache are off. Never `--all`, never drop, pop or clear.
+    public func stashPush(worktreePath: String, message: String) async throws {
+        try await run(
+            [
+                "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false",
+                "stash", "push", "--include-untracked", "--message", message,
+            ],
+            in: worktreePath,
+            timeout: .seconds(600),
+            maxOutputBytes: 1024 * 1024
+        )
+    }
+
     /// Removes a linked worktree. Never uses `--force`; a refusal from Git is final.
     public func removeWorktree(repositoryPath: String, worktreePath: String) async throws {
         try await run(["worktree", "remove", "--", worktreePath], in: repositoryPath, timeout: .seconds(120))
     }
+}
+
+/// A stash commit: its first parent is the HEAD it was made on, the second holds the index, and a third (only
+/// with untracked files) holds the untracked files.
+public struct StashCommit: Sendable, Equatable {
+    public let sha: String
+    public let parents: [String]
+    public let subject: String
 }
 
 public struct BranchUpstream: Sendable, Equatable {

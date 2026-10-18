@@ -18,8 +18,11 @@ public struct GitStatusSummary: Sendable, Equatable, Codable {
     public var ignoredPaths: [String]
     public var ignoredPathsComplete: Bool
     public var submoduleChangeCount: Int
+    /// Paths of staged, unstaged, conflicted and untracked entries, for display only (at most `changedPathLimit`).
+    public var changedPaths: [String]
 
     public static let ignoredPathLimit = 500
+    public static let changedPathLimit = 200
 
     public init(
         branchHead: String? = nil,
@@ -34,7 +37,8 @@ public struct GitStatusSummary: Sendable, Equatable, Codable {
         ignoredCount: Int = 0,
         ignoredPaths: [String] = [],
         ignoredPathsComplete: Bool = true,
-        submoduleChangeCount: Int = 0
+        submoduleChangeCount: Int = 0,
+        changedPaths: [String] = []
     ) {
         self.branchHead = branchHead
         self.commit = commit
@@ -49,6 +53,11 @@ public struct GitStatusSummary: Sendable, Equatable, Codable {
         self.ignoredPaths = ignoredPaths
         self.ignoredPathsComplete = ignoredPathsComplete
         self.submoduleChangeCount = submoduleChangeCount
+        self.changedPaths = changedPaths
+    }
+
+    mutating func noteChanged(_ path: Substring) {
+        if !path.isEmpty, changedPaths.count < Self.changedPathLimit { changedPaths.append(String(path)) }
     }
 
     /// True only when there are no staged, unstaged, unmerged, untracked, ignored or submodule entries.
@@ -84,6 +93,8 @@ public enum GitStatusParser {
                 let parts = line.split(separator: " ", maxSplits: 8, omittingEmptySubsequences: false)
                 guard parts.count >= 9 else { throw ParseError.truncatedEntry }
                 countXY(parts[1], submodule: parts[2], into: &summary)
+                // Type 2 carries "<X><score> " before the path.
+                summary.noteChanged(kind == "2" ? (parts[8].split(separator: " ", maxSplits: 1).last ?? "") : parts[8])
                 if kind == "2" {
                     // Renames/copies carry the original path as an extra NUL-terminated field.
                     guard index < fields.endIndex else { throw ParseError.truncatedEntry }
@@ -91,8 +102,11 @@ public enum GitStatusParser {
                 }
             case "u":
                 summary.unmergedCount += 1
+                let parts = line.split(separator: " ", maxSplits: 10, omittingEmptySubsequences: false)
+                if parts.count == 11 { summary.noteChanged(parts[10]) }
             case "?":
                 summary.untrackedCount += 1
+                summary.noteChanged(line.dropFirst(2))
             case "!":
                 summary.ignoredCount += 1
                 let path = String(line.dropFirst(2))

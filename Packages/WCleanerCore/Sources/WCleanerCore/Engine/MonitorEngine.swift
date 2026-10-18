@@ -424,6 +424,84 @@ public actor MonitorEngine {
         return outcome
     }
 
+    /// Removes a worktree whose pull request is not merged (open, closed, missing or not verifiable), at the
+    /// user's explicit request. Only the pull request requirement is waived: the executor runs every
+    /// structural and local check again, twice, and Git keeps the branch and its commits.
+    public func removeWorktreeWithoutMergedPullRequest(
+        repositoryID: UUID,
+        worktreePath: String,
+        expectedHead: String,
+        settings: AppSettings
+    ) async throws -> CleanupOutcome {
+        await acquire()
+        defer { release() }
+        guard let executor else { throw MonitorActionError.cleanupUnavailable }
+        guard let found = find(repositoryID: repositoryID, path: worktreePath) else {
+            throw MonitorActionError.worktreeNotFound
+        }
+        let (repository, worktree) = found
+        guard !worktree.isPrimary, worktree.decision.localChecksPassed, let head = worktree.head else {
+            throw MonitorActionError.notSafeToRemove(worktree.decision.localBlockingReasons ?? worktree.decision.blockingReasons)
+        }
+        guard head == expectedHead else {
+            throw MonitorActionError.stateChanged
+        }
+        let request = CleanupRequest(
+            repository: repository.repository,
+            worktreePath: worktree.path,
+            expectedHead: head,
+            expectedPullRequest: nil,
+            expectedHeadRepositoryFullName: nil,
+            githubRepositoryFullName: repository.githubRepository?.fullName,
+            mode: .manualUnmerged,
+            estimatedSizeBytes: worktree.diskUsage.bytes
+        )
+        let outcome = await executor.execute(request)
+        if outcome.didRemove { await diskUsage.invalidate(worktreePath) }
+        emit(.cleanupCompleted(outcome))
+        await rescan(repositoryID, settings: settings)
+        return outcome
+    }
+
+    /// Saves a worktree's uncommitted changes (staged, unstaged, untracked) in a Git stash and then removes
+    /// it, at the user's explicit request. Offered only when those changes are the sole local reason; the
+    /// executor checks everything again before it stashes and confirms the stash before it removes.
+    public func stashChangesAndRemoveWorktree(
+        repositoryID: UUID,
+        worktreePath: String,
+        expectedHead: String,
+        settings: AppSettings
+    ) async throws -> CleanupOutcome {
+        await acquire()
+        defer { release() }
+        guard let executor else { throw MonitorActionError.cleanupUnavailable }
+        guard let found = find(repositoryID: repositoryID, path: worktreePath) else {
+            throw MonitorActionError.worktreeNotFound
+        }
+        let (repository, worktree) = found
+        guard !worktree.isPrimary, worktree.decision.changesCanBeStashed, let head = worktree.head else {
+            throw MonitorActionError.notSafeToRemove(worktree.decision.localBlockingReasons ?? worktree.decision.blockingReasons)
+        }
+        guard head == expectedHead else {
+            throw MonitorActionError.stateChanged
+        }
+        let request = CleanupRequest(
+            repository: repository.repository,
+            worktreePath: worktree.path,
+            expectedHead: head,
+            expectedPullRequest: nil,
+            expectedHeadRepositoryFullName: nil,
+            githubRepositoryFullName: repository.githubRepository?.fullName,
+            mode: .manualStashed,
+            estimatedSizeBytes: worktree.diskUsage.bytes
+        )
+        let outcome = await executor.execute(request)
+        if outcome.didRemove { await diskUsage.invalidate(worktreePath) }
+        emit(.cleanupCompleted(outcome))
+        await rescan(repositoryID, settings: settings)
+        return outcome
+    }
+
     /// The account mapping of a repository changed: earlier merge confirmations no longer count.
     public func accountMappingChanged(repositoryID: UUID, settings: AppSettings) async {
         await acquire()

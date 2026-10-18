@@ -236,6 +236,56 @@ final class CleanupEligibilityEvaluatorTests: XCTestCase {
         }
     }
 
+    // MARK: Local checks alone (removal without a merged pull request)
+
+    func testLocalChecksAreReportedSeparatelyFromPullRequestReasons() {
+        var open = EligibilityFixture(); open.evidence.state = .open; open.evidence.mergedAt = nil
+        let openDecision = open.decide()
+        XCTAssertEqual(openDecision.verdict, .blocked)
+        XCTAssertTrue(openDecision.localChecksPassed, "An open pull request is not a local reason")
+        XCTAssertEqual(openDecision.localBlockingReasons, [])
+
+        var noPR = EligibilityFixture(); noPR.pullRequestOverride = .some(.notFound)
+        XCTAssertTrue(noPR.decide().localChecksPassed)
+
+        var noAccount = EligibilityFixture(); noAccount.account = .needsAccount; noAccount.pullRequestOverride = .some(nil)
+        XCTAssertTrue(noAccount.decide().localChecksPassed)
+
+        var dirty = EligibilityFixture(); dirty.evidence.state = .open; dirty.inspection.status?.untrackedCount = 1
+        XCTAssertFalse(dirty.decide().localChecksPassed)
+        XCTAssertEqual(dirty.decide().localBlockingReasons, [.untrackedFiles(1)])
+
+        var primary = EligibilityFixture(); primary.isPrimary = true
+        XCTAssertFalse(primary.decide().localChecksPassed)
+        var detached = EligibilityFixture(); detached.record = WorktreeRecord(path: detached.record.path, head: EligibilityFixture.head, isDetached: true)
+        XCTAssertFalse(detached.decide().localChecksPassed)
+        var notInspected = EligibilityFixture(); notInspected.inspectionPresent = false
+        XCTAssertFalse(notInspected.decide().localChecksPassed)
+    }
+
+    func testOnlyStagedUnstagedAndUntrackedChangesCanBeStashed() {
+        func decision(_ local: [EligibilityReason]?) -> CleanupDecision {
+            CleanupDecision(verdict: .blocked, reasons: local ?? [], evidence: nil, automaticCleanupAllowed: false, localBlockingReasons: local)
+        }
+        XCTAssertTrue(decision([.stagedChanges(1), .unstagedChanges(7), .untrackedFiles(2)]).changesCanBeStashed)
+        XCTAssertFalse(decision([]).changesCanBeStashed, "Nothing to save")
+        XCTAssertFalse(decision(nil).changesCanBeStashed, "Unknown")
+        for other: EligibilityReason in [.ignoredFiles(1), .unmergedChanges(1), .submoduleChanges(1), .hiddenIndexEntries(1),
+                                         .primaryWorktree, .detachedHead, .operationInProgress("merge"), .statusUnavailable("x")] {
+            XCTAssertFalse(decision([.unstagedChanges(1), other]).changesCanBeStashed, "\(other)")
+        }
+
+        var dirty = EligibilityFixture(); dirty.evidence.state = .open
+        dirty.inspection.status?.unstagedCount = 7
+        XCTAssertTrue(dirty.decide().changesCanBeStashed)
+        dirty.inspection.status?.ignoredCount = 1
+        XCTAssertFalse(dirty.decide().changesCanBeStashed)
+    }
+
+    func testDecisionWithoutLocalResultsNeverCountsAsPassed() {
+        XCTAssertFalse(CleanupDecision(verdict: .blocked, reasons: [], evidence: nil, automaticCleanupAllowed: false).localChecksPassed)
+    }
+
     // MARK: Disposable ignored files
 
     func testIgnoredFilesBlockUnlessEveryOneIsMarkedDisposable() {

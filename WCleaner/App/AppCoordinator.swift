@@ -642,6 +642,70 @@ final class AppCoordinator: AppActions {
         }
     }
 
+    /// Removal the user asks for although the pull request is not merged. Every local check still runs.
+    func removeWorktreeWithoutMergedPullRequest(_ worktree: WorktreeSnapshot) {
+        guard let services = requireServices() else { return }
+        if !settingsStore.settings.hasCleanupConsent {
+            requestCleanupConsent(enableAutomaticCleanup: false)
+            guard settingsStore.settings.hasCleanupConsent else { return }
+        }
+        // The removal is bound to the commit shown in the confirmation.
+        guard worktree.decision.localChecksPassed, let shownHead = worktree.head else {
+            Dialogs.showError(
+                "Worktree Not Removed",
+                MonitorActionError.notSafeToRemove(worktree.decision.localBlockingReasons ?? worktree.decision.blockingReasons).userMessage
+            )
+            return
+        }
+        guard Dialogs.confirmRemovalWithoutMergedPullRequest(worktree, removalEnabledInBuild: deletionPolicy.allowsRealRemoval) else { return }
+        Task {
+            do {
+                let outcome = try await services.engine.removeWorktreeWithoutMergedPullRequest(
+                    repositoryID: worktree.repositoryID,
+                    worktreePath: worktree.path,
+                    expectedHead: shownHead,
+                    settings: settingsStore.settings
+                )
+                await reloadHistory()
+                if !outcome.didRemove { Dialogs.showOutcome(outcome) }
+            } catch {
+                Dialogs.showError("Worktree Not Removed", error.userMessage)
+            }
+        }
+    }
+
+    /// Saves the worktree's uncommitted changes in a Git stash, then removes it. Every check still runs.
+    func stashChangesAndRemoveWorktree(_ worktree: WorktreeSnapshot) {
+        guard let services = requireServices() else { return }
+        if !settingsStore.settings.hasCleanupConsent {
+            requestCleanupConsent(enableAutomaticCleanup: false)
+            guard settingsStore.settings.hasCleanupConsent else { return }
+        }
+        guard worktree.decision.changesCanBeStashed, let shownHead = worktree.head else {
+            Dialogs.showError(
+                "Worktree Not Removed",
+                MonitorActionError.notSafeToRemove(worktree.decision.localBlockingReasons ?? worktree.decision.blockingReasons).userMessage
+            )
+            return
+        }
+        guard Dialogs.confirmStashAndRemoval(worktree, removalEnabledInBuild: deletionPolicy.allowsRealRemoval) else { return }
+        Task {
+            do {
+                let outcome = try await services.engine.stashChangesAndRemoveWorktree(
+                    repositoryID: worktree.repositoryID,
+                    worktreePath: worktree.path,
+                    expectedHead: shownHead,
+                    settings: settingsStore.settings
+                )
+                await reloadHistory()
+                // Always say where the changes went, also after a successful removal.
+                Dialogs.showOutcome(outcome)
+            } catch {
+                Dialogs.showError("Worktree Not Removed", error.userMessage)
+            }
+        }
+    }
+
     // MARK: System integration
 
     func setLaunchAtLogin(_ enabled: Bool) {

@@ -120,6 +120,51 @@ final class StatusMenuBuilderTests: XCTestCase {
         XCTAssertFalse(submenuTitles([.untrackedFiles(1)]).contains(action))
     }
 
+    /// Offered for a kept worktree only when nothing local would be lost (the pull request is the only reason).
+    func testRemoveAnywayIsOfferedOnlyWhenEveryLocalCheckPassed() throws {
+        func submenuTitles(_ decision: CleanupDecision, primary: Bool = false) -> [String] {
+            var snapshot = snapshot()
+            snapshot.repositories[0].worktrees[2].decision = decision
+            snapshot.repositories[0].worktrees[2].isPrimary = primary
+            let row = build(snapshot).items.first { $0.title.hasPrefix("dirty") }
+            return row?.submenu?.items.map(\.title) ?? []
+        }
+        let action = "Remove Worktree Anyway…"
+        let openPR = CleanupDecision(verdict: .blocked, reasons: [.pullRequestOpen(48)], evidence: nil, automaticCleanupAllowed: false, localBlockingReasons: [])
+        XCTAssertTrue(submenuTitles(openPR).contains(action))
+        XCTAssertFalse(submenuTitles(openPR).contains("Remove Worktree Now…"))
+        XCTAssertFalse(submenuTitles(openPR, primary: true).contains(action))
+
+        let dirty = CleanupDecision(verdict: .blocked, reasons: [.unstagedChanges(7)], evidence: nil, automaticCleanupAllowed: false, localBlockingReasons: [.unstagedChanges(7)])
+        XCTAssertFalse(submenuTitles(dirty).contains(action))
+        XCTAssertFalse(submenuTitles(decision(.blocked, [.noPullRequest])).contains(action), "Unknown local state is never offered")
+
+        let safe = CleanupDecision(verdict: .eligible, reasons: [], evidence: nil, automaticCleanupAllowed: false, localBlockingReasons: [])
+        XCTAssertFalse(submenuTitles(safe).contains(action), "A merged, safe worktree uses the normal removal")
+    }
+
+    /// Offered when uncommitted changes are the only local reason, never next to another local problem.
+    func testSaveChangesAndRemoveIsOfferedOnlyForStashableChanges() throws {
+        func submenuTitles(_ local: [EligibilityReason]?, primary: Bool = false) -> [String] {
+            var snapshot = snapshot()
+            snapshot.repositories[0].worktrees[2].decision = CleanupDecision(
+                verdict: .blocked, reasons: (local ?? []) + [.needsAccount], evidence: nil, automaticCleanupAllowed: false, localBlockingReasons: local
+            )
+            snapshot.repositories[0].worktrees[2].isPrimary = primary
+            let row = build(snapshot).items.first { $0.title.hasPrefix("dirty") }
+            return row?.submenu?.items.map(\.title) ?? []
+        }
+        let action = "Save Changes and Remove Worktree…"
+        XCTAssertTrue(submenuTitles([.unstagedChanges(7)]).contains(action))
+        XCTAssertTrue(submenuTitles([.stagedChanges(1), .untrackedFiles(2)]).contains(action))
+        XCTAssertFalse(submenuTitles([.unstagedChanges(7)], primary: true).contains(action))
+        XCTAssertFalse(submenuTitles([.unstagedChanges(1), .ignoredFiles(1)]).contains(action))
+        XCTAssertFalse(submenuTitles([.unmergedChanges(1)]).contains(action))
+        XCTAssertFalse(submenuTitles(nil).contains(action))
+        XCTAssertFalse(submenuTitles([]).contains(action), "A clean worktree gets Remove Worktree Anyway instead")
+        XCTAssertTrue(submenuTitles([]).contains("Remove Worktree Anyway…"))
+    }
+
     func testCircleStatusIconsUseAWhiteGlyphOnAColouredCircle() throws {
         let image = try XCTUnwrap(StatusMenuBuilder.coloredSymbol("lock.circle.fill", color: .systemGray, description: "Kept"))
         let side = 64
@@ -268,6 +313,8 @@ private final class TargetSpy: NSObject, StatusMenuTarget {
     func reviewWorktree(_ sender: NSMenuItem) {}
     func removeWorktree(_ sender: NSMenuItem) {}
     func allowDisposableIgnoredFiles(_ sender: NSMenuItem) {}
+    func removeWorktreeWithoutMergedPullRequest(_ sender: NSMenuItem) {}
+    func stashChangesAndRemoveWorktree(_ sender: NSMenuItem) {}
     func openRepositorySettings(_ sender: Any?) {}
     func quit(_ sender: Any?) {}
 }

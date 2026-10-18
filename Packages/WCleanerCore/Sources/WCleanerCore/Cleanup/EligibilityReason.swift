@@ -70,6 +70,10 @@ public enum EligibilityReason: Sendable, Hashable {
     case anotherCleanupInProgress
     case worktreeNoLongerListed
     case expectationChanged(String)
+    /// Informational: the worktree's uncommitted changes were saved in this stash commit before removal.
+    case changesStashed(String)
+    /// Git did not save the changes in a stash in a way WCleaner could confirm; nothing is removed.
+    case stashNotConfirmed(String)
 
     public enum Kind: Sendable {
         /// Prevents any removal.
@@ -84,7 +88,8 @@ public enum EligibilityReason: Sendable, Hashable {
         switch self {
         case .mergedBeforeEnrollment:
             .review
-        case .waitingForDelay, .cleanupConsentMissing, .automaticCleanupOff, .automaticCleanupPaused, .disposableIgnoredFiles:
+        case .waitingForDelay, .cleanupConsentMissing, .automaticCleanupOff, .automaticCleanupPaused, .disposableIgnoredFiles,
+             .changesStashed:
             .info
         default:
             .blocking
@@ -158,6 +163,10 @@ public enum EligibilityReason: Sendable, Hashable {
         case .anotherCleanupInProgress: "Another cleanup is already running for this repository."
         case .worktreeNoLongerListed: "Git no longer lists this worktree."
         case .expectationChanged(let detail): "The worktree changed since it was checked: \(detail)"
+        case .changesStashed(let commit):
+            "Its uncommitted changes were saved in Git stash \(commit.prefix(12)). Restore them in any worktree of this repository with “git stash apply \(commit)”."
+        case .stashNotConfirmed(let detail):
+            "WCleaner could not confirm that Git saved the changes in a stash, so nothing was removed. \(detail) Your changes are still in the worktree or in “git stash list”."
         }
     }
 
@@ -181,6 +190,16 @@ public enum EnglishDateFormat {
 }
 
 extension EligibilityReason {
+    /// Uncommitted changes that `git stash push --include-untracked` can save completely: staged and unstaged
+    /// changes to tracked files and untracked (not ignored) files. Conflicts, submodule changes, hidden index
+    /// entries and ignored files are not.
+    public var isStashable: Bool {
+        switch self {
+        case .stagedChanges, .unstagedChanges, .untrackedFiles: true
+        default: false
+        }
+    }
+
     /// "a, b, c and 4 more"
     public static func list(_ items: [String], total: Int? = nil, limit: Int = 5) -> String {
         let shown = items.prefix(limit).joined(separator: ", ")

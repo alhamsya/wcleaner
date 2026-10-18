@@ -164,6 +164,16 @@ final class StatusItemController: NSObject, NSMenuDelegate, StatusMenuTarget {
         model.actions?.removeWorktreeManually(worktree)
     }
 
+    func removeWorktreeWithoutMergedPullRequest(_ sender: NSMenuItem) {
+        guard let worktree = sender.representedObject as? WorktreeSnapshot else { return }
+        model.actions?.removeWorktreeWithoutMergedPullRequest(worktree)
+    }
+
+    func stashChangesAndRemoveWorktree(_ sender: NSMenuItem) {
+        guard let worktree = sender.representedObject as? WorktreeSnapshot else { return }
+        model.actions?.stashChangesAndRemoveWorktree(worktree)
+    }
+
     func allowDisposableIgnoredFiles(_ sender: NSMenuItem) {
         guard let worktree = sender.representedObject as? WorktreeSnapshot else { return }
         model.actions?.allowDisposableIgnoredFiles(worktree)

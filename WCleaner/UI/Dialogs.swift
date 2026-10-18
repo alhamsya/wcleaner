@@ -112,6 +112,73 @@ enum Dialogs {
         return confirm(title: "Remove Worktree “\(worktree.name)”?", message: lines.joined(separator: "\n"), action: "Remove Worktree", destructive: true)
     }
 
+    static func confirmRemovalWithoutMergedPullRequest(_ worktree: WorktreeSnapshot, removalEnabledInBuild: Bool) -> Bool {
+        let branch = worktree.branch ?? "none"
+        var lines = [
+            "Folder: \(worktree.path)",
+            "Branch: \(branch) at \(worktree.shortHead)",
+            "Pull request: \(worktree.pullRequest?.summary ?? "not checked")",
+            "Estimated size: \(worktree.diskUsage.displayString)",
+        ]
+        for reason in worktree.decision.reasons {
+            if case .disposableIgnoredFiles(let paths) = reason {
+                lines.append("Ignored files you marked as disposable are deleted with it: \(EligibilityReason.list(paths, limit: 10)).")
+            }
+        }
+        lines.append("")
+        lines.append("This worktree has no merged pull request. WCleaner checks again that nothing local would be lost "
+            + "(uncommitted, untracked or ignored files, checked-out submodules, hidden index entries), then runs "
+            + "“git worktree remove” without --force. If anything changed, nothing is removed.")
+        lines.append("")
+        lines.append("The branch “\(branch)” and all its commits stay in the repository, so you can check it out again later. "
+            + "Commits that were never pushed exist only in that local branch. Any pull request stays as it is on GitHub.")
+        if !removalEnabledInBuild {
+            lines.append("")
+            lines.append("This development build will stop before removing anything.")
+        }
+        return confirm(
+            title: "Remove “\(worktree.name)” Without a Merged Pull Request?",
+            message: lines.joined(separator: "\n"),
+            action: "Remove Worktree",
+            destructive: true
+        )
+    }
+
+    static func confirmStashAndRemoval(_ worktree: WorktreeSnapshot, removalEnabledInBuild: Bool) -> Bool {
+        let branch = worktree.branch ?? "none"
+        let changes = worktree.decision.reasons.filter(\.isStashable).map(\.message)
+        var lines = [
+            "Folder: \(worktree.path)",
+            "Branch: \(branch) at \(worktree.shortHead)",
+            "Pull request: \(worktree.pullRequest?.summary ?? "not checked")",
+            "",
+            "Uncommitted changes to save:",
+        ]
+        lines += changes.map { "• " + $0.replacingOccurrences(of: " would be lost", with: "") }
+        let paths = worktree.inspection?.status?.changedPaths ?? []
+        if !paths.isEmpty {
+            lines.append("Files: \(EligibilityReason.list(paths, limit: 10))")
+        }
+        lines.append("")
+        lines.append("WCleaner first checks everything else, then saves these changes in a Git stash in the repository "
+            + "(“git stash push --include-untracked”) and confirms that the stash holds them. Only then does it run "
+            + "“git worktree remove” without --force. If any step fails, the worktree is kept.")
+        lines.append("")
+        lines.append("Restore the changes later in any worktree of this repository with “git stash apply <stash>”; "
+            + "WCleaner shows the exact command afterwards and in History. The branch “\(branch)” and its commits stay. "
+            + "Ignored files are not saved.")
+        if !removalEnabledInBuild {
+            lines.append("")
+            lines.append("This development build will stop before changing or removing anything.")
+        }
+        return confirm(
+            title: "Save Changes and Remove “\(worktree.name)”?",
+            message: lines.joined(separator: "\n"),
+            action: "Save and Remove",
+            destructive: true
+        )
+    }
+
     static func showOutcome(_ outcome: CleanupOutcome) {
         let alert = NSAlert()
         let name = (outcome.entry.worktreePath as NSString).lastPathComponent
@@ -127,6 +194,7 @@ enum Dialogs {
             alert.alertStyle = .warning
             alert.messageText = "Git did not remove “\(name)”"
             alert.informativeText = (entry.errorMessage ?? "Unknown error.") + "\n\nWCleaner never retries with --force. Check the worktree in Terminal if you want to remove it yourself."
+                + (entry.stashCommit.map { "\n\n" + EligibilityReason.changesStashed($0).message } ?? "")
         }
         alert.addButton(withTitle: "OK")
         NSApp.activate()

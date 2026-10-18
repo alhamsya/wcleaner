@@ -178,7 +178,7 @@ final class CleanupExecutorTests: XCTestCase {
             repository: repository,
             worktreePath: path ?? worktree,
             expectedHead: expectedHead ?? head,
-            expectedPullRequest: 12,
+            expectedPullRequest: mode == .manualUnmerged ? nil : 12,
             expectedHeadRepositoryFullName: "octo/repo",
             githubRepositoryFullName: "octo/repo",
             mode: mode,
@@ -374,6 +374,227 @@ final class CleanupExecutorTests: XCTestCase {
         try FileManager.default.createDirectory(atPath: gitDirectory + "/modules/lib", withIntermediateDirectories: true)
         assertRefused(await makeExecutor().execute(request())) { $0 == .submodules }
         XCTAssertTrue(FileManager.default.fileExists(atPath: gitDirectory + "/modules/lib"))
+    }
+
+    // MARK: Removal without a merged pull request
+
+    func testCleanWorktreeWithAnOpenPullRequestIsRemovedOnRequestAndBranchIsKept() async throws {
+        evidence.set(evidence: .success(pullRequest(state: .open)))
+        let outcome = await makeExecutor().execute(request(mode: .manualUnmerged))
+        guard case .removed(let entry) = outcome else { return XCTFail("Expected removal, got \(outcome)") }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: worktree))
+        XCTAssertFalse(try listedPaths().contains(worktree))
+        XCTAssertEqual(try fixture.git(["rev-parse", "--verify", "refs/heads/feature"]), head, "The branch and its commits are kept")
+        XCTAssertEqual(entry.mode, .manualUnmerged)
+        XCTAssertNil(entry.pullRequestNumber)
+        XCTAssertTrue(entry.rationale.contains { $0.contains("without a merged pull request") })
+        XCTAssertEqual(evidence.entered, 0, "No GitHub evidence is needed")
+    }
+
+    func testRemovalWithoutAMergedPullRequestNeedsNoAccountOrPullRequest() async throws {
+        evidence.set(resolution: RepositoryResolution(resolution: .needsAccount, githubRepository: nil, remotes: [], githubRemotes: [:]))
+        evidence.set(evidence: .failure(.notFound))
+        let outcome = await makeExecutor().execute(request(mode: .manualUnmerged))
+        XCTAssertTrue(outcome.didRemove, "\(outcome)")
+    }
+
+    func testRemovalWithoutAMergedPullRequestStillNeedsConsent() async throws {
+        live.value = settings(consent: false)
+        assertRefused(await makeExecutor().execute(request(mode: .manualUnmerged))) { $0 == .cleanupConsentMissing }
+    }
+
+    func testRemovalWithoutAMergedPullRequestKeepsEveryLocalCheck() async throws {
+        try fixture.write("notes.txt", "keep me\n", in: worktree)
+        assertRefused(await makeExecutor().execute(request(mode: .manualUnmerged))) { $0 == .untrackedFiles(1) }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: worktree + "/notes.txt"))
+
+        try FileManager.default.removeItem(atPath: worktree + "/notes.txt")
+        try fixture.write("feature.txt", "changed\n", in: worktree)
+        assertRefused(await makeExecutor().execute(request(mode: .manualUnmerged))) { if case .unstagedChanges = $0 { true } else { false } }
+
+        try fixture.git(["checkout", "--", "feature.txt"], in: worktree)
+        try fixture.git(["update-ref", "refs/worktree/keep", head], in: worktree)
+        assertRefused(await makeExecutor().execute(request(mode: .manualUnmerged))) { $0 == .perWorktreeRefs(["refs/worktree/keep"]) }
+    }
+
+    func testRemovalWithoutAMergedPullRequestNeverRemovesThePrimaryWorktree() async throws {
+        let primaryHead = try fixture.head()
+        let outcome = await makeExecutor().execute(request(path: fixture.repositoryPath, expectedHead: primaryHead, mode: .manualUnmerged))
+        guard case .refused(_, let reasons) = outcome else { return XCTFail("Expected refusal, got \(outcome)") }
+        XCTAssertTrue(reasons.contains(.primaryWorktree), "\(reasons)")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.repositoryPath + "/README.md"))
+    }
+
+    func testRemovalWithoutAMergedPullRequestStopsWhenAFileAppearsJustBefore() async throws {
+        let notes = worktree + "/notes.txt"
+        live.setOnRead { read, _ in
+            // The third read is the last settings check, right before the final inspection.
+            if read == 3 { try? "keep\n".write(toFile: notes, atomically: true, encoding: .utf8) }
+        }
+        assertRefused(await makeExecutor().execute(request(mode: .manualUnmerged))) { $0 == .expectationChanged("The worktree changed during verification.") }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: notes))
+    }
+
+    func testMergedModesRequireAPullRequestNumber() async throws {
+        var withoutNumber = request()
+        withoutNumber.expectedPullRequest = nil
+        assertRefused(await makeExecutor().execute(withoutNumber)) { if case .expectationChanged = $0 { true } else { false } }
+    }
+
+    // MARK: Saving changes in a stash, then removing
+
+    private func stashList() throws -> String {
+        try fixture.git(["stash", "list", "--format=%H %s"])
+    }
+
+    private func makeChanges() throws {
+        try fixture.write("feature.txt", "changed\n", in: worktree)
+        try fixture.write("staged.txt", "staged\n", in: worktree)
+        try fixture.git(["add", "staged.txt"], in: worktree)
+        try fixture.write("notes/todo.txt", "untracked\n", in: worktree)
+    }
+
+    func testChangesAreSavedInAStashAndThenTheWorktreeIsRemoved() async throws {
+        try makeChanges()
+        let outcome = await makeExecutor().execute(request(mode: .manualStashed))
+        guard case .removed(let entry) = outcome else { return XCTFail("Expected removal, got \(outcome)") }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: worktree))
+        XCTAssertEqual(try fixture.git(["rev-parse", "--verify", "refs/heads/feature"]), head, "The branch is kept")
+
+        let stash = try XCTUnwrap(entry.stashCommit)
+        let list = try stashList()
+        XCTAssertTrue(list.contains("\(stash) On feature: WCleaner "), list)
+        XCTAssertEqual(try fixture.git(["rev-parse", "\(stash)^1"]), head, "Made on the worktree's HEAD")
+        XCTAssertEqual(try fixture.git(["show", "\(stash):feature.txt"]), "changed", "Unstaged change saved")
+        XCTAssertEqual(try fixture.git(["show", "\(stash)^2:staged.txt"]), "staged", "Staged file saved")
+        XCTAssertEqual(try fixture.git(["show", "\(stash)^3:notes/todo.txt"]), "untracked", "Untracked file saved")
+        XCTAssertEqual(entry.mode, .manualStashed)
+        XCTAssertTrue(entry.rationale.contains { $0.contains("git stash apply \(stash)") }, "\(entry.rationale)")
+    }
+
+    func testNothingIsStashedWhenAnotherLocalCheckFails() async throws {
+        try fixture.write(".gitignore", ".env\n", in: worktree)
+        try fixture.git(["add", ".gitignore"], in: worktree)
+        try fixture.git(["commit", "-q", "-m", "Ignore"], in: worktree)
+        head = try fixture.head(of: worktree)
+        try fixture.write(".env", "SECRET=1\n", in: worktree)
+        try fixture.write("feature.txt", "changed\n", in: worktree)
+
+        assertRefused(await makeExecutor().execute(request(mode: .manualStashed))) { $0 == .ignoredFiles(1, paths: [".env"]) }
+        XCTAssertEqual(try stashList(), "", "Nothing was stashed")
+        XCTAssertEqual(try String(contentsOfFile: worktree + "/feature.txt", encoding: .utf8), "changed\n")
+
+        try FileManager.default.removeItem(atPath: worktree + "/.env")
+        try fixture.git(["update-index", "--skip-worktree", "README.md"], in: worktree)
+        assertRefused(await makeExecutor().execute(request(mode: .manualStashed))) { $0 == .hiddenIndexEntries(1) }
+        XCTAssertEqual(try stashList(), "")
+    }
+
+    func testNothingIsStashedWithoutConsentOrWhenThereIsNothingToSave() async throws {
+        try fixture.write("feature.txt", "changed\n", in: worktree)
+        live.value = settings(consent: false)
+        assertRefused(await makeExecutor().execute(request(mode: .manualStashed))) { $0 == .cleanupConsentMissing }
+        XCTAssertEqual(try stashList(), "")
+
+        live.value = settings()
+        try fixture.git(["checkout", "--", "feature.txt"], in: worktree)
+        assertRefused(await makeExecutor().execute(request(mode: .manualStashed))) { if case .expectationChanged = $0 { true } else { false } }
+        XCTAssertEqual(try stashList(), "")
+    }
+
+    func testThePrimaryWorktreeIsNeverStashed() async throws {
+        try fixture.write("README.md", "primary change\n")
+        let outcome = await makeExecutor().execute(request(path: fixture.repositoryPath, expectedHead: try fixture.head(), mode: .manualStashed))
+        guard case .refused = outcome else { return XCTFail("Expected refusal, got \(outcome)") }
+        XCTAssertEqual(try stashList(), "")
+        XCTAssertEqual(try String(contentsOfFile: fixture.repositoryPath + "/README.md", encoding: .utf8), "primary change\n")
+    }
+
+    /// After stashing, the removal still runs every local check; a refusal says where the changes are.
+    func testAFileAppearingAfterTheStashStopsRemovalAndTheStashIsReported() async throws {
+        try makeChanges()
+        let late = worktree + "/late.txt"
+        live.setOnRead { read, _ in
+            // Read 5 is the last settings check after the stash, right before the final inspection.
+            if read == 5 { try? "late\n".write(toFile: late, atomically: true, encoding: .utf8) }
+        }
+        let outcome = await makeExecutor().execute(request(mode: .manualStashed))
+        guard case .refused(let entry, let reasons) = outcome else { return XCTFail("Expected refusal, got \(outcome)") }
+        let stash = try XCTUnwrap(entry.stashCommit)
+        XCTAssertEqual(reasons.first, .changesStashed(stash))
+        XCTAssertTrue(reasons.contains(.untrackedFiles(1)), "\(reasons)")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: late))
+        XCTAssertTrue(try stashList().contains(stash))
+        XCTAssertEqual(try fixture.git(["show", "\(stash):feature.txt"]), "changed")
+    }
+
+    /// A Git wrapper that logs every call and can fake `stash push` (success without saving anything).
+    private func loggingGit(fakeStashPush: Bool = false, refuseRemoval: Bool = false) throws -> (GitClient, String) {
+        let script = fixture.root + "/logging-git.sh"
+        let log = fixture.root + "/git-calls.log"
+        try """
+        #!/bin/sh
+        printf '%s\\n' "$*" >> '\(log)'
+        prev=""
+        for arg in "$@"; do
+          if [ "\(fakeStashPush)" = "true" ] && [ "$prev" = "stash" ] && [ "$arg" = "push" ]; then
+            echo "Saved working directory and index state (pretend)"
+            exit 0
+          fi
+          if [ "\(refuseRemoval)" = "true" ] && [ "$prev" = "worktree" ] && [ "$arg" = "remove" ]; then
+            echo "fatal: simulated refusal" >&2
+            exit 128
+          fi
+          prev="$arg"
+        done
+        exec /usr/bin/git "$@"
+        """.write(toFile: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script)
+        return (GitClient(executableURL: URL(fileURLWithPath: script), environment: TemporaryGitRepository.isolatedEnvironment), log)
+    }
+
+    func testAStashThatCannotBeConfirmedStopsBeforeRemoval() async throws {
+        // An older stash on the same HEAD must not be mistaken for the one this attempt should have made.
+        try fixture.write("feature.txt", "older work\n", in: worktree)
+        try fixture.write("older.txt", "older untracked\n", in: worktree)
+        try fixture.git(["stash", "push", "--include-untracked", "--message", "older work"], in: worktree)
+        try makeChanges()
+        let (git, _) = try loggingGit(fakeStashPush: true)
+        assertRefused(await makeExecutor(git: git).execute(request(mode: .manualStashed))) { if case .stashNotConfirmed = $0 { true } else { false } }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: worktree + "/notes/todo.txt"), "Nothing was touched")
+        XCTAssertEqual(try String(contentsOfFile: worktree + "/feature.txt", encoding: .utf8), "changed\n")
+    }
+
+    func testStashUsesOnlySafeArgumentsAndAGitRefusalAfterwardsKeepsTheStash() async throws {
+        try makeChanges()
+        let (git, log) = try loggingGit(refuseRemoval: true)
+        let outcome = await makeExecutor(git: git).execute(request(mode: .manualStashed))
+        guard case .failed(let entry) = outcome else { return XCTFail("Expected failure, got \(outcome)") }
+        let stash = try XCTUnwrap(entry.stashCommit)
+        XCTAssertTrue(try stashList().contains(stash))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: worktree + "/feature.txt"))
+
+        let calls = try String(contentsOfFile: log, encoding: .utf8).split(separator: "\n").map(String.init)
+        let pushes = calls.filter { $0.contains(" stash push ") }
+        XCTAssertEqual(pushes.count, 1)
+        XCTAssertTrue(pushes[0].hasPrefix("-C \(worktree!) -c core.hooksPath=/dev/null -c core.fsmonitor=false -c core.untrackedCache=false stash push --include-untracked --message WCleaner "), pushes[0])
+        for forbidden in ["--all", " -a ", "stash drop", "stash pop", "stash clear", "--force", " clean", "branch -D", "prune"] {
+            XCTAssertFalse(calls.contains { $0.contains(forbidden) }, "Never \(forbidden)")
+        }
+        XCTAssertEqual(calls.filter { $0.contains("worktree remove") }.count, 1, "No retry after a refusal")
+    }
+
+    func testHooksDoNotRunWhileStashing() async throws {
+        let marker = fixture.root + "/hook-ran"
+        let hooks = try fixture.git(["rev-parse", "--path-format=absolute", "--git-common-dir"]) + "/hooks"
+        try FileManager.default.createDirectory(atPath: hooks, withIntermediateDirectories: true)
+        try "#!/bin/sh\ntouch '\(marker)'\n".write(toFile: hooks + "/reference-transaction", atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: hooks + "/reference-transaction")
+        try fixture.write("feature.txt", "changed\n", in: worktree)
+
+        let outcome = await makeExecutor().execute(request(mode: .manualStashed))
+        XCTAssertTrue(outcome.didRemove, "\(outcome)")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker), "The repository's hooks did not run")
     }
 
     // MARK: Disposable ignored files

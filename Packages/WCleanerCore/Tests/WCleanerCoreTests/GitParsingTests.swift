@@ -58,6 +58,17 @@ final class GitStatusParserTests: XCTestCase {
         XCTAssertFalse(truncated.ignoredPathsComplete)
     }
 
+    func testListsChangedPathsForDisplay() throws {
+        let summary = try GitStatusParser.parse(nul([
+            "1 .M N... 100644 100644 100644 aaaa bbbb dir/unstaged file.txt",
+            "2 R. N... 100644 100644 100644 aaaa bbbb R100 new name.txt", "old name.txt",
+            "u UU N... 100644 100644 100644 100644 aaaa bbbb cccc conflict.txt",
+            "? notes/",
+            "! ignored.log",
+        ]))
+        XCTAssertEqual(summary.changedPaths, ["dir/unstaged file.txt", "new name.txt", "conflict.txt", "notes/"])
+    }
+
     func testIgnoredEntryWithoutPathFailsClosed() {
         XCTAssertThrowsError(try GitStatusParser.parse(nul(["!"])))
         XCTAssertThrowsError(try GitStatusParser.parse(nul(["! "])))
